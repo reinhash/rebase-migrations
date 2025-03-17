@@ -1,5 +1,7 @@
 use clap::{Arg, Command};
 use std::env;
+use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -67,6 +69,59 @@ fn find_migration_dirs(search_path: &str) -> Vec<PathBuf> {
     migration_dirs
 }
 
+struct ConflictInfo {
+    head_migration: String,
+    branch_migration: String,
+}
+
+fn detect_merge_conflict(content: &str) -> Option<ConflictInfo> {
+    // Check if the content contains conflict markers
+    if !content.contains("<<<<<<<") || !content.contains("=======") || !content.contains(">>>>>>>")
+    {
+        return None;
+    }
+
+    // Extract the conflicting parts
+    let head_start = content.find("<<<<<<<").unwrap();
+    let separator = content.find("=======").unwrap();
+    let branch_end = content.find(">>>>>>>").unwrap();
+
+    // Extract the migration names
+    let head_part = &content[head_start + 7..separator].trim();
+    let branch_part = &content[separator + 7..branch_end].trim();
+
+    // Return the conflict info
+    Some(ConflictInfo {
+        head_migration: head_part.to_string(),
+        branch_migration: branch_part.to_string(),
+    })
+}
+
+fn find_migration_file(dir: &Path, migration_prefix: &str) -> Option<PathBuf> {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("py") {
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if file_name.starts_with(migration_prefix) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_migration_number(migration_name: &str) -> Option<String> {
+    // Migration names usually start with a number followed by underscore
+    // e.g. "0040_delete_cms_pages_add_about_us_page"
+    if let Some(underscore_pos) = migration_name.find('_') {
+        return Some(migration_name[..underscore_pos].to_string());
+    }
+    None
+}
+
 fn fix_command(search_path: &str, dry_run: bool) {
     let migration_dirs = find_migration_dirs(search_path);
 
@@ -75,37 +130,114 @@ fn fix_command(search_path: &str, dry_run: bool) {
         return;
     }
 
-    println!("Found {} migration directories:", migration_dirs.len());
+    println!("Found {} migration directories", migration_dirs.len());
+    println!("Searching for merge conflicts in max_migration.txt files...");
+
+    let mut conflicts_found = false;
 
     for migration_dir in &migration_dirs {
-        if dry_run {
-            println!(
-                "Dry run: Would fix migrations in {}",
-                migration_dir.display()
-            );
-        } else {
-            println!("Fixing migrations in {}", migration_dir.display());
-            // Process each migration directory
-            process_migration_dir(migration_dir);
+        if check_for_conflicts(migration_dir) {
+            conflicts_found = true;
         }
+    }
+
+    if !conflicts_found {
+        println!("\nNo merge conflicts found in any max_migration.txt files.");
     }
 }
 
-fn process_migration_dir(dir: &Path) {
-    // Here you would implement the actual migration fixing logic
-    // For now we just print information about the directory
-    println!("  Processing directory: {}", dir.display());
+fn check_for_conflicts(dir: &Path) -> bool {
+    let max_migration_path = dir.join("max_migration.txt");
 
-    // Example: List all Python files in the migration directory
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("py") {
+    if !max_migration_path.exists() {
+        return false;
+    }
+
+    // Read the file content
+    let mut content = String::new();
+    match fs::File::open(&max_migration_path).and_then(|mut file| file.read_to_string(&mut content))
+    {
+        Ok(_) => {}
+        Err(_) => return false,
+    }
+
+    // Check for merge conflicts
+    if let Some(conflict) = detect_merge_conflict(&content) {
+        // Print conflict information
+        println!("\n=== MERGE CONFLICT FOUND ===");
+        println!("Directory: {}", dir.display());
+        println!("File: {}", max_migration_path.display());
+        println!("Content:");
+        println!("```");
+        println!("{}", content);
+        println!("```");
+
+        // Extract migration numbers
+        let head_num = extract_migration_number(&conflict.head_migration);
+        let branch_num = extract_migration_number(&conflict.branch_migration);
+
+        // Focus on the branch migration (the incoming change)
+        println!("Current (HEAD) migration: {}", conflict.head_migration);
+        println!("Incoming branch migration: {}", conflict.branch_migration);
+
+        // Highlight the problematic file (from the branch being rebased)
+        if let Some(branch_num) = branch_num {
+            if let Some(branch_file) = find_migration_file(dir, &branch_num) {
+                println!("\n!!! PROBLEMATIC MIGRATION FILE !!!");
+                println!("File: {}", branch_file.display());
+                println!("This is the migration from the branch you're rebasing.");
+            } else {
                 println!(
-                    "    Found migration file: {}",
-                    path.file_name().unwrap().to_string_lossy()
+                    "\nBranch migration file not found for prefix {}_",
+                    branch_num
+                );
+                println!("This is unusual and may indicate a more complex conflict.");
+            }
+        }
+
+        // Show head file for reference but with less emphasis
+        if let Some(head_num) = head_num {
+            if let Some(head_file) = find_migration_file(dir, &head_num) {
+                println!(
+                    "\nCurrent repository migration file: {}",
+                    head_file.display()
+                );
+            } else {
+                println!(
+                    "\nCurrent repository migration file not found for prefix {}_",
+                    head_num
                 );
             }
         }
+
+        // List all migrations in the directory for reference
+        println!("\nAll migration files in directory:");
+        if let Ok(entries) = fs::read_dir(dir) {
+            let mut migration_files: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|entry| {
+                    let path = entry.path();
+                    path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("py")
+                })
+                .map(|entry| entry.path())
+                .collect();
+
+            migration_files.sort_by(|a, b| {
+                a.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .cmp(b.file_name().unwrap().to_str().unwrap())
+            });
+
+            for file in migration_files {
+                println!("  - {}", file.file_name().unwrap().to_string_lossy());
+            }
+        }
+
+        println!("\n------------------------------------");
+        return true;
     }
+
+    false
 }
