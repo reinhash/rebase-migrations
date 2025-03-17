@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 clap = "4.5.32"
 walkdir = "2.4.0"
+git2 = "0.18.2"
