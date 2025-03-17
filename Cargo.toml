@@ -1,0 +1,8 @@
+[package]
+name = "rebase-migrations"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = "4.5.32"
+walkdir = "2.4.0"
