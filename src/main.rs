@@ -1,8 +1,6 @@
 mod cli;
 mod rebase;
 
-use git2::{Repository, Status};
-
 use cli::build as cli_builder;
 use cli::{DRY_RUN, FIX, PATH};
 
