@@ -62,13 +62,34 @@ struct MigrationGroup {
 }
 
 impl MigrationGroup {
+    /// This function should find the last head migration in the group
+    /// Our new migrations lowest number could be smaller than the last head migration.
+    /// It could be the same.
+    /// But it can never be larger.
+    /// So we need to find the last head migration in the group.
     fn find_last_head_migration(&self) -> Option<PathBuf> {
-        // This function should find the last head migration in the group
-        // For now, it returns None as a placeholder
-        let dir = self.directory()?;
-        println!("Directory: {:?}", dir);
         let lowest_number = self.lowest_migration_number()?;
-        println!("Lowest migration number: {:?}", lowest_number);
+        let files = self.sorted_files_in_dir()?;
+        for file in files {
+            if let Some(file_name) = file.file_name() {
+                let file_path = file.to_path_buf();
+                if self.migration_files.contains(&file_path) {
+                    continue;
+                }
+                let file_name_str = file_name.to_string_lossy();
+                if let Some(pos) = file_name_str.find('_') {
+                    if pos > 0 && file_name_str[..pos].chars().all(|c| c.is_digit(10)) {
+                        let number_str = &file_name_str[..pos];
+                        if let Ok(number) = number_str.parse::<u32>() {
+                            if number >= lowest_number {
+                                return Some(file);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -76,6 +97,23 @@ impl MigrationGroup {
         self.migration_files
             .get(0)
             .and_then(|path| path.parent().map(|p| p.to_path_buf()))
+    }
+
+    /// Finds all current files in the migration directory.
+    fn sorted_files_in_dir(&self) -> Option<Vec<PathBuf>> {
+        let dir = self.directory()?;
+        let mut files = Vec::new();
+        if let Ok(entries) = dir.read_dir() {
+            for entry in entries.flatten() {
+                if let Some(file_name) = entry.file_name().to_str() {
+                    if file_name.ends_with(".py") && file_name != "__init__.py" {
+                        files.push(entry.path());
+                    }
+                }
+            }
+        }
+        files.sort_by(|a, b| a.cmp(b));
+        Some(files)
     }
 
     /// Finds the lowest migration number in the group.
@@ -131,5 +169,6 @@ pub fn fix(search_path: &str, dry_run: bool) {
     let migration_groups = MigrationGroup::group_by_dir(migrations);
     for group in migration_groups {
         let last_head_migration = group.find_last_head_migration();
+        println!("last head migration: {:?}", last_head_migration);
     }
 }
