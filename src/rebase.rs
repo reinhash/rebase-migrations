@@ -1,5 +1,6 @@
 use git2::Repository;
 
+use rustpython_parser::{Parse, ast};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -191,19 +192,52 @@ impl MigrationGroup {
 
         self.migration_name_changes = Some(new_migration_names);
     }
-    fn rename_files(&self) {
+    fn rename_files(&self, dry_run: bool) -> Result<(), String> {
         for migration in self.migrations.values() {
-            if let Some(new_path) = migration.new_full_path(&self.migration_dir) {
+            let new_path = migration.new_full_path(&self.migration_dir).ok_or(format!(
+                "Failed to generate new path for migration {}",
+                migration.name
+            ))?;
+            if !dry_run {
                 if let Err(e) =
-                    std::fs::rename(migration.old_full_path(&self.migration_dir), new_path)
+                    std::fs::rename(migration.old_full_path(&self.migration_dir), &new_path)
                 {
-                    eprintln!("Error renaming file: {}", e);
+                    return Err(format!(
+                        "Failed to rename migration {}: {}",
+                        migration.name, e
+                    ));
                 }
+            } else {
+                println!(
+                    "DRY RUN: Renaming {} to {}",
+                    migration.old_full_path(&self.migration_dir).display(),
+                    new_path.display()
+                );
             }
         }
+        Ok(())
     }
 
-    fn update_migration_file_dependencies(&self) {}
+    /// Uses Python AST to parse the migration files and find the dependencies array.
+    /// Then it updates the entry in the dependencies array with the new migration file name.
+    fn update_migration_file_dependencies(&self, dry_run: bool) -> Result<(), String> {
+        if dry_run {
+            return Ok(());
+        }
+        for migration in self.migrations.values() {
+            let python_path = migration.new_full_path(&self.migration_dir).unwrap();
+            let python_source = std::fs::read_to_string(&python_path)
+                .map_err(|e| format!("Failed to read file {}: {}", python_path.display(), e))?;
+            let python_statements =
+                ast::Suite::parse(&python_source, python_path.to_str().unwrap()).unwrap(); // statements
+            println!("{:?}", python_statements);
+        }
+        Ok(())
+    }
+
+    fn update_max_migration_file(&self, dry_run: bool) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl MigrationGroup {
@@ -253,18 +287,16 @@ impl MigrationGroup {
     }
 }
 
-pub fn fix(search_path: &str, dry_run: bool) {
+pub fn fix(search_path: &str, dry_run: bool) -> Result<(), String> {
     let migrations = find_staged_migrations(Path::new(search_path));
     let mut migration_groups = MigrationGroup::create(migrations);
     for group in migration_groups.iter_mut() {
         if let Some(last_head_migration) = group.find_last_head_migration() {
-            println!("Last head migration: {}", last_head_migration.display());
             group.generate_new_migration_numbers(last_head_migration);
-            println!("Group: {:?}", group);
-            if !dry_run {
-                group.rename_files();
-                group.update_migration_file_dependencies();
-            }
+            group.rename_files(dry_run)?;
+            group.update_migration_file_dependencies(dry_run)?;
+            group.update_max_migration_file(dry_run)?;
         }
     }
+    Ok(())
 }
