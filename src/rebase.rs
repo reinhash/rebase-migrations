@@ -84,9 +84,16 @@ fn get_name_from_migration(migration: &PathBuf) -> Option<String> {
     None
 }
 
+#[derive(Debug, Clone)]
+struct Migration {
+    number: u32,
+    name: String,
+    new_number: Option<u32>,
+}
+
 #[derive(Debug)]
 struct MigrationGroup {
-    migration_file_names: HashMap<u32, String>,
+    migrations: HashMap<u32, Migration>,
     migration_dir: PathBuf,
     migration_name_changes: Option<HashMap<String, String>>,
 }
@@ -126,13 +133,9 @@ impl MigrationGroup {
         None
     }
 
-    fn directory(&self) -> PathBuf {
-        self.migration_dir.clone()
-    }
-
     /// Finds all current files in the migration directory.
     fn sorted_files_in_dir(&self) -> Option<Vec<PathBuf>> {
-        let dir = self.directory();
+        let dir = self.migration_dir.clone();
         let mut files = Vec::new();
         if let Ok(entries) = dir.read_dir() {
             for entry in entries.flatten() {
@@ -150,7 +153,7 @@ impl MigrationGroup {
     /// Finds the lowest migration number in the group.
     fn lowest_migration_number(&self) -> Option<u32> {
         let mut lowest_number = None;
-        for number in self.migration_file_names.keys() {
+        for number in self.migrations.keys() {
             if lowest_number.is_none() || *number < lowest_number.unwrap() {
                 lowest_number = Some(*number);
             }
@@ -159,9 +162,13 @@ impl MigrationGroup {
     }
 
     fn migration_paths(&self) -> Vec<PathBuf> {
-        self.migration_file_names
+        self.migrations
             .iter()
-            .map(|(_, name)| self.migration_dir.join(name).with_extension("py"))
+            .map(|(_, migration)| {
+                self.migration_dir
+                    .join(format!("{:04}_{}", migration.number, migration.name))
+                    .with_extension("py")
+            })
             .collect()
     }
 
@@ -169,14 +176,19 @@ impl MigrationGroup {
         let last_head_migration_number = get_number_from_migration(&last_head_migration).unwrap();
         let mut new_migration_names = HashMap::new();
 
-        let mut old_migration_paths = self.migration_paths();
-        old_migration_paths.sort_by(|a, b| a.cmp(b));
-        //  add 1 to last_head_migration_number to get the new migration number
+        // Get migrations sorted by their number
+        let mut sorted_migrations: Vec<&mut Migration> = self.migrations.values_mut().collect();
+        sorted_migrations.sort_by_key(|m| m.number);
+
+        // Start numbering from last_head_migration_number + 1
         let mut new_migration_number = last_head_migration_number + 1;
-        for old_migration_path in old_migration_paths {
-            let old_migration_name = get_name_from_migration(&old_migration_path).unwrap();
-            let new_migration_name = format!("{:04}_{}", new_migration_number, old_migration_name);
-            new_migration_names.insert(old_migration_name, new_migration_name);
+
+        for migration in sorted_migrations {
+            // Set the new_number field in the Migration struct
+            migration.new_number = Some(new_migration_number);
+
+            let new_migration_name = format!("{:04}_{}", new_migration_number, migration.name);
+            new_migration_names.insert(migration.name.clone(), new_migration_name);
             new_migration_number += 1;
         }
 
@@ -188,16 +200,21 @@ impl MigrationGroup {
     fn create(migrations: Vec<PathBuf>) -> Vec<MigrationGroup> {
         let mut grouped_migrations: Vec<MigrationGroup> = Vec::new();
 
-        for migration in migrations {
-            let parent_dir = migration.parent().unwrap().to_path_buf();
+        for migration_path in migrations {
+            let parent_dir = migration_path.parent().unwrap().to_path_buf();
             let mut found_group = false;
-            let migration_number = get_number_from_migration(&migration);
+            let migration_number = get_number_from_migration(&migration_path).unwrap();
+            let migration_name = get_name_from_migration(&migration_path).unwrap();
 
             for group in &mut grouped_migrations {
                 if group.migration_dir == parent_dir {
-                    group.migration_file_names.insert(
-                        migration_number.unwrap(),
-                        get_name_from_migration(&migration).unwrap(),
+                    group.migrations.insert(
+                        migration_number,
+                        Migration {
+                            number: migration_number,
+                            name: migration_name.clone(),
+                            new_number: None,
+                        },
                     );
                     found_group = true;
                     break;
@@ -205,17 +222,23 @@ impl MigrationGroup {
             }
 
             if !found_group {
+                let mut migrations_map = HashMap::new();
+                migrations_map.insert(
+                    migration_number,
+                    Migration {
+                        number: migration_number,
+                        name: migration_name,
+                        new_number: None,
+                    },
+                );
+
                 grouped_migrations.push(MigrationGroup {
-                    migration_file_names: HashMap::from([(
-                        migration_number.unwrap(),
-                        get_name_from_migration(&migration).unwrap(),
-                    )]),
+                    migrations: migrations_map,
                     migration_dir: parent_dir,
                     migration_name_changes: None,
                 });
             }
         }
-
         grouped_migrations
     }
 }
