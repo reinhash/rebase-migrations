@@ -91,6 +91,20 @@ struct Migration {
     new_number: Option<u32>,
 }
 
+impl Migration {
+    fn old_full_path(&self, migration_dir: &PathBuf) -> PathBuf {
+        migration_dir
+            .join(format!("{:04}_{}", self.number, self.name))
+            .with_extension("py")
+    }
+    fn new_full_path(&self, migration_dir: &PathBuf) -> Option<PathBuf> {
+        let number = self.new_number?;
+        let new_name = format!("{:04}_{}", number, self.name);
+        let new_path = migration_dir.join(new_name);
+        Some(new_path.with_extension("py").into())
+    }
+}
+
 #[derive(Debug)]
 struct MigrationGroup {
     migrations: HashMap<u32, Migration>,
@@ -105,11 +119,10 @@ impl MigrationGroup {
     /// But it can never be larger.
     /// So we need to find the last head migration in the group.
     fn find_last_head_migration(&self) -> Option<PathBuf> {
-        let lowest_number = self.lowest_migration_number()?;
         let files = self.sorted_files_in_dir()?;
-
         let migration_paths = self.migration_paths();
-
+        let mut highest_number = 0;
+        let mut last_head_migration = None;
         for file in files {
             if let Some(file_name) = file.file_name() {
                 let file_path = file.to_path_buf();
@@ -121,16 +134,16 @@ impl MigrationGroup {
                     if pos > 0 && file_name_str[..pos].chars().all(|c| c.is_digit(10)) {
                         let number_str = &file_name_str[..pos];
                         if let Ok(number) = number_str.parse::<u32>() {
-                            if number >= lowest_number {
-                                return Some(file);
+                            if number >= highest_number {
+                                highest_number = number;
+                                last_head_migration = Some(file_path);
                             }
                         }
                     }
                 }
             }
         }
-
-        None
+        last_head_migration
     }
 
     /// Finds all current files in the migration directory.
@@ -150,29 +163,14 @@ impl MigrationGroup {
         Some(files)
     }
 
-    /// Finds the lowest migration number in the group.
-    fn lowest_migration_number(&self) -> Option<u32> {
-        let mut lowest_number = None;
-        for number in self.migrations.keys() {
-            if lowest_number.is_none() || *number < lowest_number.unwrap() {
-                lowest_number = Some(*number);
-            }
-        }
-        lowest_number
-    }
-
     fn migration_paths(&self) -> Vec<PathBuf> {
         self.migrations
             .iter()
-            .map(|(_, migration)| {
-                self.migration_dir
-                    .join(format!("{:04}_{}", migration.number, migration.name))
-                    .with_extension("py")
-            })
+            .map(|(_, migration)| migration.old_full_path(&self.migration_dir))
             .collect()
     }
 
-    fn generate_new_migration_names(&mut self, last_head_migration: PathBuf) {
+    fn generate_new_migration_numbers(&mut self, last_head_migration: PathBuf) {
         let last_head_migration_number = get_number_from_migration(&last_head_migration).unwrap();
         let mut new_migration_names = HashMap::new();
 
@@ -182,7 +180,6 @@ impl MigrationGroup {
 
         // Start numbering from last_head_migration_number + 1
         let mut new_migration_number = last_head_migration_number + 1;
-
         for migration in sorted_migrations {
             // Set the new_number field in the Migration struct
             migration.new_number = Some(new_migration_number);
@@ -194,6 +191,19 @@ impl MigrationGroup {
 
         self.migration_name_changes = Some(new_migration_names);
     }
+    fn rename_files(&self) {
+        for migration in self.migrations.values() {
+            if let Some(new_path) = migration.new_full_path(&self.migration_dir) {
+                if let Err(e) =
+                    std::fs::rename(migration.old_full_path(&self.migration_dir), new_path)
+                {
+                    eprintln!("Error renaming file: {}", e);
+                }
+            }
+        }
+    }
+
+    fn update_migration_file_dependencies(&self) {}
 }
 
 impl MigrationGroup {
@@ -247,9 +257,14 @@ pub fn fix(search_path: &str, dry_run: bool) {
     let migrations = find_staged_migrations(Path::new(search_path));
     let mut migration_groups = MigrationGroup::create(migrations);
     for group in migration_groups.iter_mut() {
-        let last_head_migration = group.find_last_head_migration().unwrap();
-        println!("Last head migration: {:?}", last_head_migration);
-        group.generate_new_migration_names(last_head_migration);
+        if let Some(last_head_migration) = group.find_last_head_migration() {
+            println!("Last head migration: {}", last_head_migration.display());
+            group.generate_new_migration_numbers(last_head_migration);
+            println!("Group: {:?}", group);
+            if !dry_run {
+                group.rename_files();
+                group.update_migration_file_dependencies();
+            }
+        }
     }
-    println!("Migration groups: {:?}", migration_groups);
 }
