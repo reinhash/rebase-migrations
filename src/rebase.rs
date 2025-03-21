@@ -88,7 +88,7 @@ fn get_name_from_migration(migration: &PathBuf) -> Option<String> {
 struct MigrationGroup {
     migration_file_names: HashMap<u32, String>,
     migration_dir: PathBuf,
-    new_migration_names: Option<HashMap<PathBuf, PathBuf>>,
+    migration_name_changes: Option<HashMap<String, String>>,
 }
 
 impl MigrationGroup {
@@ -176,15 +176,11 @@ impl MigrationGroup {
         for old_migration_path in old_migration_paths {
             let old_migration_name = get_name_from_migration(&old_migration_path).unwrap();
             let new_migration_name = format!("{:04}_{}", new_migration_number, old_migration_name);
-            let new_migration_path = self
-                .directory()
-                .join(new_migration_name)
-                .with_extension("py");
-            new_migration_names.insert(old_migration_path, new_migration_path);
+            new_migration_names.insert(old_migration_name, new_migration_name);
             new_migration_number += 1;
         }
 
-        self.new_migration_names = Some(new_migration_names);
+        self.migration_name_changes = Some(new_migration_names);
     }
 }
 
@@ -215,7 +211,7 @@ impl MigrationGroup {
                         get_name_from_migration(&migration).unwrap(),
                     )]),
                     migration_dir: parent_dir,
-                    new_migration_names: None,
+                    migration_name_changes: None,
                 });
             }
         }
