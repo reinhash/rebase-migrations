@@ -86,7 +86,8 @@ fn get_name_from_migration(migration: &PathBuf) -> Option<String> {
 
 #[derive(Debug)]
 struct MigrationGroup {
-    migration_files: HashMap<u32, PathBuf>,
+    migration_file_names: HashMap<u32, String>,
+    migration_dir: PathBuf,
     new_migration_names: Option<HashMap<PathBuf, PathBuf>>,
 }
 
@@ -125,17 +126,13 @@ impl MigrationGroup {
         None
     }
 
-    fn directory(&self) -> Option<PathBuf> {
-        self.migration_files
-            .values()
-            .next()
-            .and_then(|path| path.parent())
-            .map(|p| p.to_path_buf())
+    fn directory(&self) -> PathBuf {
+        self.migration_dir.clone()
     }
 
     /// Finds all current files in the migration directory.
     fn sorted_files_in_dir(&self) -> Option<Vec<PathBuf>> {
-        let dir = self.directory()?;
+        let dir = self.directory();
         let mut files = Vec::new();
         if let Ok(entries) = dir.read_dir() {
             for entry in entries.flatten() {
@@ -153,7 +150,7 @@ impl MigrationGroup {
     /// Finds the lowest migration number in the group.
     fn lowest_migration_number(&self) -> Option<u32> {
         let mut lowest_number = None;
-        for number in self.migration_files.keys() {
+        for number in self.migration_file_names.keys() {
             if lowest_number.is_none() || *number < lowest_number.unwrap() {
                 lowest_number = Some(*number);
             }
@@ -162,7 +159,10 @@ impl MigrationGroup {
     }
 
     fn migration_paths(&self) -> Vec<PathBuf> {
-        self.migration_files.values().cloned().collect::<Vec<_>>()
+        self.migration_file_names
+            .iter()
+            .map(|(_, name)| self.migration_dir.join(name).with_extension("py"))
+            .collect()
     }
 
     fn generate_new_migration_names(&mut self, last_head_migration: PathBuf) {
@@ -178,7 +178,6 @@ impl MigrationGroup {
             let new_migration_name = format!("{:04}_{}", new_migration_number, old_migration_name);
             let new_migration_path = self
                 .directory()
-                .unwrap()
                 .join(new_migration_name)
                 .with_extension("py");
             new_migration_names.insert(old_migration_path, new_migration_path);
@@ -194,15 +193,16 @@ impl MigrationGroup {
         let mut grouped_migrations: Vec<MigrationGroup> = Vec::new();
 
         for migration in migrations {
-            let parent_dir = migration.parent().unwrap();
+            let parent_dir = migration.parent().unwrap().to_path_buf();
             let mut found_group = false;
             let migration_number = get_number_from_migration(&migration);
 
             for group in &mut grouped_migrations {
-                if group.migration_files.values().next().unwrap().parent() == Some(parent_dir) {
-                    group
-                        .migration_files
-                        .insert(migration_number.unwrap(), migration.clone());
+                if group.migration_dir == parent_dir {
+                    group.migration_file_names.insert(
+                        migration_number.unwrap(),
+                        get_name_from_migration(&migration).unwrap(),
+                    );
                     found_group = true;
                     break;
                 }
@@ -210,7 +210,11 @@ impl MigrationGroup {
 
             if !found_group {
                 grouped_migrations.push(MigrationGroup {
-                    migration_files: HashMap::from([(migration_number.unwrap(), migration)]),
+                    migration_file_names: HashMap::from([(
+                        migration_number.unwrap(),
+                        get_name_from_migration(&migration).unwrap(),
+                    )]),
+                    migration_dir: parent_dir,
                     new_migration_names: None,
                 });
             }
