@@ -6,6 +6,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Check if the given string is a migration file name.
+/// A migration file name should start with a number followed by an underscore.
+/// For example: `"0001_initial.py"`, `"0002_auto_20230901_1234.py"`
+fn is_migration_file(s: &str) -> bool {
+    s.find('_')
+        .is_some_and(|pos| pos > 0 && s[..pos].chars().all(|c| c.is_ascii_digit()))
+}
+
 fn find_staged_migrations(repo_path: &Path) -> Vec<PathBuf> {
     let mut staged_migrations = Vec::new();
     let Ok(repo) = Repository::open(repo_path) else {
@@ -40,10 +48,8 @@ fn find_staged_migrations(repo_path: &Path) -> Vec<PathBuf> {
             let file_name = Path::new(path).file_name().unwrap_or_default();
             let file_name_str = file_name.to_string_lossy();
 
-            if let Some(pos) = file_name_str.find('_') {
-                if pos > 0 && file_name_str[..pos].chars().all(|c| c.is_ascii_digit()) {
-                    staged_migrations.push(repo_path.join(path));
-                }
+            if is_migration_file(&file_name_str) {
+                staged_migrations.push(repo_path.join(path));
             }
         }
     }
@@ -61,11 +67,9 @@ fn stringify_migration_path(migration: &Path) -> Option<String> {
 
 fn get_number_from_migration(migration: &Path) -> Option<u32> {
     let file_name_str = stringify_migration_path(migration)?;
-    if let Some(pos) = file_name_str.find('_') {
-        if pos > 0 && file_name_str[..pos].chars().all(|c| c.is_ascii_digit()) {
-            let number_str = &file_name_str[..pos];
-            return number_str.parse::<u32>().ok();
-        }
+    if is_migration_file(&file_name_str) {
+        let number_str = &file_name_str[..4];
+        return number_str.parse::<u32>().ok();
     }
     None
 }
@@ -90,8 +94,13 @@ fn find_migration_string_location_in_file(
 ) -> Result<(u32, u32), String> {
     let python_source = std::fs::read_to_string(python_path)
         .map_err(|e| format!("Failed to read file {}: {}", python_path.display(), e))?;
-    let python_statements =
-        ast::Suite::parse(&python_source, python_path.to_str().unwrap()).unwrap(); // statements
+    let python_statements = ast::Suite::parse(
+        &python_source,
+        python_path
+            .to_str()
+            .expect("Failed to convert path to string"),
+    )
+    .map_err(|e| format!("Failed to parse python statements: {e}"))?;
     for statement in python_statements {
         if let ast::Stmt::ClassDef(class) = statement {
             if &class.name.to_string() == "Migration" {
@@ -110,23 +119,34 @@ fn find_migration_string_location_in_file(
                             if let ast::Expr::List(dep_list) = &assign.value.as_ref() {
                                 for tuple in &dep_list.elts {
                                     if let ast::Expr::Tuple(tuple_items) = tuple {
-                                        let django_app = {
-                                            match tuple_items.elts.first().unwrap() {
+                                        let django_app = match tuple_items.elts.first() {
+                                            Some(expr) => match expr {
                                                 ast::Expr::Constant(django_app) => {
-                                                    django_app.value.as_str().unwrap()
+                                                    django_app.value.as_str()
+                                                        .expect("Since we are using a string, we should be able to convert it to a str")
                                                 }
-                                                _ => panic!(
-                                                    "Expected a django app name as first item of the tuple."
-                                                ),
-                                            }
+                                                _ => return Err(format!(
+                                                    "Expected a django app name as first item of the tuple in {}",
+                                                    python_path.display()
+                                                )),
+                                            },
+                                            None => return Err(format!(
+                                                "Missing first element in dependencies tuple in {}",
+                                                python_path.display()
+                                            )),
                                         };
+
                                         // we only want to update the dependencies for the current app
                                         if django_app != app_name {
                                             continue;
                                         }
 
-                                        let migration_name_expression =
-                                            tuple_items.elts.get(1).unwrap();
+                                        let migration_name_expression = tuple_items.elts.get(1)
+                                            .ok_or_else(|| format!(
+                                                "Missing migration name in dependencies tuple in {}",
+                                                python_path.display()
+                                            ))?;
+
                                         if let ast::Expr::Constant(mig_const) =
                                             migration_name_expression
                                         {
@@ -211,7 +231,6 @@ impl MigrationGroup {
     /// Our new migrations lowest number could be smaller than the last head migration.
     /// It could be the same.
     /// But it can never be larger.
-    /// So we need to find the last head migration in the group.
     fn find_last_head_migration(&self) -> Option<PathBuf> {
         let files = self.sorted_files_in_dir();
         let migration_paths = self.migration_paths();
@@ -221,18 +240,18 @@ impl MigrationGroup {
             if let Some(file_name) = file.file_name() {
                 let file_path = file.clone();
                 if migration_paths.contains(&file_path) {
+                    // We could have migrations with much higher numbers
+                    // that are coming from our branch. But we are only
+                    // interested in the last migration of the branch
+                    // that we rebase against.
                     continue;
                 }
                 let file_name_str = file_name.to_string_lossy();
-                if let Some(pos) = file_name_str.find('_') {
-                    if pos > 0 && file_name_str[..pos].chars().all(|c| c.is_ascii_digit()) {
-                        let number_str = &file_name_str[..pos];
-                        if let Ok(number) = number_str.parse::<u32>() {
-                            if number >= highest_number {
-                                highest_number = number;
-                                last_head_migration = Some(file_path);
-                            }
-                        }
+                if is_migration_file(&file_name_str) {
+                    let number = get_number_from_migration(&file)?;
+                    if number >= highest_number {
+                        highest_number = number;
+                        last_head_migration = Some(file_path);
                     }
                 }
             }
@@ -265,7 +284,10 @@ impl MigrationGroup {
     /// The app name is the folder name on level above the migration directory.
     fn get_app_name(&self) -> &str {
         let levels: Vec<_> = self.migration_dir.components().collect();
-        levels[levels.len() - 2].as_os_str().to_str().unwrap()
+        levels[levels.len() - 2]
+            .as_os_str()
+            .to_str()
+            .expect("We must be able to convert the app name to a string")
     }
 
     fn migration_paths(&self) -> Vec<PathBuf> {
@@ -275,52 +297,65 @@ impl MigrationGroup {
             .collect()
     }
 
-    fn add_previous_migration_name(&mut self, last_head_migration: &Path) {
+    fn add_previous_migration_name(&mut self, last_head_migration: &Path) -> Result<(), String> {
         let lowest_number = self
             .migrations
             .values()
             .map(|migration| migration.number)
             .min()
-            .unwrap_or(0);
+            .ok_or_else(|| "No migrations found".to_string())?;
         let migrations_lookup = self.migrations.clone();
 
         for (number, migration) in &mut self.migrations {
             if number == &lowest_number {
-                migration.previous_migration_name =
-                    Some(get_name_from_migration(last_head_migration).unwrap());
+                let previous_migration_name = get_name_from_migration(last_head_migration)
+                    .ok_or_else(|| {
+                        format!(
+                            "Failed to get migration name from path: {}",
+                            last_head_migration.display()
+                        )
+                    })?;
+                migration.previous_migration_name = Some(previous_migration_name);
             } else {
                 migration.previous_migration_name = Some(
                     migrations_lookup
                         .get(&(migration.number - 1))
-                        .unwrap()
+                        .ok_or_else(|| {
+                            format!("Failed to find previous migration for {}", migration.name)
+                        })?
                         .name
                         .clone(),
                 );
             }
         }
+        Ok(())
     }
 
-    fn generate_new_migration_numbers(&mut self, last_head_migration: &Path) {
-        let last_head_migration_number = get_number_from_migration(last_head_migration).unwrap();
+    fn generate_new_migration_numbers(&mut self, last_head_migration: &Path) -> Result<(), String> {
+        let last_head_migration_number = get_number_from_migration(last_head_migration)
+            .ok_or_else(|| {
+                format!(
+                    "Failed to get migration number from path: {}",
+                    last_head_migration.display()
+                )
+            })?;
         let mut new_migration_names = HashMap::new();
-
         // Get migrations sorted by their number
         let mut sorted_migrations: Vec<&mut Migration> = self.migrations.values_mut().collect();
         sorted_migrations.sort_by_key(|m| m.number);
 
-        // Start numbering from last_head_migration_number + 1
         let mut new_migration_number = last_head_migration_number + 1;
         for migration in sorted_migrations {
-            // Set the new_number field in the Migration struct
             migration.new_number = Some(new_migration_number);
 
             let new_migration_name = format!("{:04}_{}", new_migration_number, migration.name);
             new_migration_names.insert(migration.name.clone(), new_migration_name);
             new_migration_number += 1;
         }
-
         self.migration_name_changes = Some(new_migration_names);
+        Ok(())
     }
+
     fn rename_files(&self, dry_run: bool) -> Result<(), String> {
         for migration in self.migrations.values() {
             let new_path = migration
@@ -333,7 +368,7 @@ impl MigrationGroup {
                 })?;
             if dry_run {
                 println!(
-                    "DRY RUN: Renaming {} to {}",
+                    "Would rename {} to {}",
                     migration.old_full_path(&self.migration_dir).display(),
                     new_path.display()
                 );
@@ -352,21 +387,35 @@ impl MigrationGroup {
     /// Uses Python AST to parse the migration files and find the dependencies array.
     /// Then it updates the entry in the dependencies array with the new migration file name.
     fn update_migration_file_dependencies(&self, dry_run: bool) -> Result<(), String> {
+        if dry_run {
+            return Ok(());
+        }
         let app_name = self.get_app_name();
         for migration in self.migrations.values() {
-            let python_path = if dry_run {
-                migration.old_full_path(&self.migration_dir)
-            } else {
-                migration.new_full_path(&self.migration_dir).unwrap()
-            };
+            let python_path = migration
+                .new_full_path(&self.migration_dir)
+                .ok_or_else(|| {
+                    format!(
+                        "Failed to get new full path for migration {}",
+                        migration.name
+                    )
+                })?;
             let (start, end) = find_migration_string_location_in_file(&python_path, app_name)?;
             let replacement = {
-                let number = migration.new_number.unwrap() - 1;
-                let name = migration.previous_migration_name.as_ref().unwrap();
+                let number = migration
+                    .new_number
+                    .expect("New Migration numbers must be set at this point.")
+                    - 1;
+                let name = migration
+                    .previous_migration_name
+                    .as_ref()
+                    .expect("Previous migration name must be set at this point.");
                 format!("'{number:04}_{name}'")
             };
             replace_range_in_file(
-                python_path.to_str().unwrap(),
+                python_path
+                    .to_str()
+                    .expect("Migration file path must be valid UTF-8"),
                 start as usize,
                 end as usize,
                 &replacement,
@@ -377,36 +426,59 @@ impl MigrationGroup {
     }
 
     /// Write the migration with the highest number in the file
-    fn update_max_migration_file(&self, dry_run: bool) {
+    fn update_max_migration_file(&self, dry_run: bool) -> Result<(), String> {
         if dry_run {
-            println!("DRY RUN: Updating max migration file");
-        } else {
-            let max_migration_number = self.find_highest_migration_number().unwrap();
-            let max_migration = self.migrations.get(&max_migration_number).unwrap();
-            let max_migration_path = self
-                .migration_dir
-                .join("max_migration")
-                .with_extension("txt");
-            let content = format!(
-                "{:04}_{}\n",
-                max_migration.new_number.unwrap(),
-                max_migration.name
-            );
-            std::fs::write(max_migration_path, content).unwrap();
+            return Ok(());
         }
+        let max_migration_number = self.find_highest_migration_number().unwrap_or(0);
+        let max_migration = self.migrations.get(&max_migration_number).ok_or_else(|| {
+            format!("No migration found for the highest number: {max_migration_number}")
+        })?;
+        let max_migration_path = self
+            .migration_dir
+            .join("max_migration")
+            .with_extension("txt");
+        let content = format!(
+            "{:04}_{}\n",
+            max_migration
+                .new_number
+                .expect("New migration number must be set."),
+            max_migration.name
+        );
+        std::fs::write(max_migration_path, content)
+            .map_err(|e| format!("Failed to write max migration file: {e}"))?;
+        Ok(())
     }
 }
 
 impl MigrationGroup {
-    fn create(migrations: Vec<PathBuf>) -> Vec<Self> {
+    fn create(migrations: Vec<PathBuf>) -> Result<Vec<Self>, String> {
         let mut grouped_migrations: Vec<Self> = Vec::new();
 
         for migration_path in migrations {
-            let parent_dir = migration_path.parent().unwrap().to_path_buf();
-            let mut found_group = false;
-            let migration_number = get_number_from_migration(&migration_path).unwrap();
-            let migration_name = get_name_from_migration(&migration_path).unwrap();
+            let parent_dir = match migration_path.parent() {
+                Some(dir) => dir.to_path_buf(),
+                None => {
+                    return Err(format!(
+                        "Failed to get parent directory for migration path: {}",
+                        migration_path.display()
+                    ));
+                }
+            };
+            let migration_number = get_number_from_migration(&migration_path).ok_or_else(|| {
+                format!(
+                    "Failed to get migration number from path: {}",
+                    migration_path.display()
+                )
+            })?;
+            let migration_name = get_name_from_migration(&migration_path).ok_or_else(|| {
+                format!(
+                    "Failed to get migration name from path: {}",
+                    migration_path.display()
+                )
+            })?;
 
+            let mut found_group = false;
             for group in &mut grouped_migrations {
                 if group.migration_dir == parent_dir {
                     group.migrations.insert(
@@ -434,7 +506,6 @@ impl MigrationGroup {
                         previous_migration_name: None,
                     },
                 );
-
                 grouped_migrations.push(Self {
                     migrations: migrations_map,
                     migration_dir: parent_dir,
@@ -442,20 +513,23 @@ impl MigrationGroup {
                 });
             }
         }
-        grouped_migrations
+        Ok(grouped_migrations)
     }
 }
 
 pub fn fix(search_path: &str, dry_run: bool) -> Result<(), String> {
+    if dry_run {
+        println!("Dry run detected. No changes will be made.");
+    }
     let migrations = find_staged_migrations(Path::new(search_path));
-    let mut migration_groups = MigrationGroup::create(migrations);
+    let mut migration_groups = MigrationGroup::create(migrations)?;
     for group in &mut migration_groups {
         if let Some(last_head_migration) = group.find_last_head_migration() {
-            group.generate_new_migration_numbers(&last_head_migration);
-            group.add_previous_migration_name(&last_head_migration);
+            group.generate_new_migration_numbers(&last_head_migration)?;
+            group.add_previous_migration_name(&last_head_migration)?;
             group.rename_files(dry_run)?;
             group.update_migration_file_dependencies(dry_run)?;
-            group.update_max_migration_file(dry_run);
+            group.update_max_migration_file(dry_run)?;
         }
     }
     Ok(())
