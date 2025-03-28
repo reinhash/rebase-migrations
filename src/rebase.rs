@@ -205,6 +205,10 @@ struct MigrationGroup {
 }
 
 impl MigrationGroup {
+    fn find_highest_migration_number(&self) -> Option<u32> {
+        self.migrations.keys().max().copied()
+    }
+
     /// This function should find the last head migration in the group
     /// Our new migrations lowest number could be smaller than the last head migration.
     /// It could be the same.
@@ -368,9 +372,23 @@ impl MigrationGroup {
         Ok(())
     }
 
+    /// Write the migration with the highest number in the file
     fn update_max_migration_file(&self, dry_run: bool) -> Result<(), String> {
         if dry_run {
             println!("DRY RUN: Updating max migration file");
+        } else {
+            let max_migration_number = self.find_highest_migration_number().unwrap();
+            let max_migration = self.migrations.get(&max_migration_number).unwrap();
+            let max_migration_path = self
+                .migration_dir
+                .join("max_migration")
+                .with_extension("txt");
+            let content = format!(
+                "{:04}_{}\n",
+                max_migration.new_number.unwrap(),
+                max_migration.name
+            );
+            std::fs::write(max_migration_path, content).unwrap();
         }
         Ok(())
     }
