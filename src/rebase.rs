@@ -8,27 +8,22 @@ use std::{
 
 fn find_staged_migrations(repo_path: &Path) -> Vec<PathBuf> {
     let mut staged_migrations = Vec::new();
-
-    // Open the git repository
     let repo = match Repository::open(repo_path) {
         Ok(repo) => repo,
         Err(_) => return staged_migrations,
     };
 
-    // Get the repository status with options to include staged files
     let mut status_opts = git2::StatusOptions::new();
     status_opts
         .include_ignored(false)
         .include_untracked(false)
         .include_unmodified(false);
 
-    // Get the repository status
     let statuses = match repo.statuses(Some(&mut status_opts)) {
         Ok(statuses) => statuses,
         Err(_) => return staged_migrations,
     };
 
-    // Filter for staged files that are migration files
     for status_entry in statuses.iter() {
         let status = status_entry.status();
         let path = match status_entry.path() {
@@ -36,7 +31,6 @@ fn find_staged_migrations(repo_path: &Path) -> Vec<PathBuf> {
             None => continue,
         };
 
-        // Check if it's a staged file (added, modified, or renamed)
         let is_staged =
             status.is_index_new() || status.is_index_modified() || status.is_index_renamed();
 
@@ -45,7 +39,6 @@ fn find_staged_migrations(repo_path: &Path) -> Vec<PathBuf> {
             && path.ends_with(".py")
             && path != "__init__.py"
         {
-            // Check if it's a migration file (has a numeric prefix)
             let file_name = Path::new(path).file_name().unwrap_or_default();
             let file_name_str = file_name.to_string_lossy();
 
@@ -60,29 +53,126 @@ fn find_staged_migrations(repo_path: &Path) -> Vec<PathBuf> {
     staged_migrations
 }
 
-fn get_number_from_migration(migration: &PathBuf) -> Option<u32> {
+fn stringify_migration_path(migration: &PathBuf) -> Option<String> {
     if let Some(file_name) = migration.file_name() {
         let file_name_str = file_name.to_string_lossy();
-        if let Some(pos) = file_name_str.find('_') {
-            if pos > 0 && file_name_str[..pos].chars().all(|c| c.is_digit(10)) {
-                let number_str = &file_name_str[..pos];
-                return number_str.parse::<u32>().ok();
-            }
+        return Some(file_name_str.to_string());
+    }
+    None
+}
+
+fn get_number_from_migration(migration: &PathBuf) -> Option<u32> {
+    let file_name_str = stringify_migration_path(migration)?;
+    if let Some(pos) = file_name_str.find('_') {
+        if pos > 0 && file_name_str[..pos].chars().all(|c| c.is_digit(10)) {
+            let number_str = &file_name_str[..pos];
+            return number_str.parse::<u32>().ok();
         }
     }
     None
 }
 
 fn get_name_from_migration(migration: &PathBuf) -> Option<String> {
-    if let Some(file_name) = migration.file_name() {
-        let file_name_str = file_name.to_string_lossy();
-        if let Some(pos) = file_name_str.find('_') {
-            if pos > 0 {
-                return Some(file_name_str[pos + 1..].to_string());
+    let file_name_str = stringify_migration_path(migration)?;
+    if let Some(pos) = file_name_str.find('_') {
+        if pos > 0 {
+            let name = &file_name_str[pos + 1..];
+            if name.ends_with(".py") {
+                return Some(name[..name.len() - 3].to_string());
             }
+            return Some(name.to_string());
         }
     }
     None
+}
+
+fn find_migration_string_location_in_file(
+    python_path: &PathBuf,
+    app_name: &str,
+) -> Result<(u32, u32), String> {
+    let python_source = std::fs::read_to_string(&python_path)
+        .map_err(|e| format!("Failed to read file {}: {}", python_path.display(), e))?;
+    let python_statements =
+        ast::Suite::parse(&python_source, python_path.to_str().unwrap()).unwrap(); // statements
+    for statement in python_statements {
+        if let ast::Stmt::ClassDef(class) = statement {
+            if &class.name.to_string() == "Migration" {
+                for item in class.body {
+                    if let ast::Stmt::Assign(assign) = item {
+                        let mut found = false;
+                        for target in &assign.targets {
+                            if let ast::Expr::Name(name) = &target {
+                                if &name.id == "dependencies" {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if found {
+                            if let ast::Expr::List(dep_list) = &assign.value.as_ref() {
+                                for tuple in &dep_list.elts {
+                                    if let ast::Expr::Tuple(tuple_items) = tuple {
+                                        let django_app = {
+                                            match tuple_items.elts.iter().nth(0).unwrap() {
+                                                ast::Expr::Constant(django_app) => {
+                                                    django_app.value.as_str().unwrap()
+                                                }
+                                                _ => panic!(
+                                                    "Expected a django app name as first item of the tuple."
+                                                ),
+                                            }
+                                        };
+                                        // we only want to update the dependencies for the current app
+                                        if django_app != app_name {
+                                            continue;
+                                        }
+
+                                        let migration_name_expression =
+                                            tuple_items.elts.iter().nth(1).unwrap();
+                                        if let ast::Expr::Constant(mig_const) =
+                                            migration_name_expression
+                                        {
+                                            let range = mig_const.range;
+                                            let start = u32::from(range.start());
+                                            let end = u32::from(range.end());
+                                            return Ok((start, end));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err(format!(
+        "Failed to find migration string location in file {}",
+        python_path.display()
+    ))
+}
+
+fn replace_range_in_file(
+    file_path: &str,
+    start_offset: usize,
+    end_offset: usize,
+    replacement: &str,
+    dry_run: bool,
+) -> Result<(), String> {
+    if dry_run {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(file_path)
+        .map_err(|e| format!("Failed to read file {}: {}", file_path, e))?;
+    let new_content = format!(
+        "{}{}{}",
+        &content[..start_offset],
+        replacement,
+        &content[end_offset..]
+    );
+    std::fs::write(file_path, new_content)
+        .map_err(|e| format!("Failed to write to file {}: {}", file_path, e))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +180,7 @@ struct Migration {
     number: u32,
     name: String,
     new_number: Option<u32>,
+    previous_migration_name: Option<String>,
 }
 
 impl Migration {
@@ -164,6 +255,13 @@ impl MigrationGroup {
         Some(files)
     }
 
+    /// Returns the Django app name from the migration directory.
+    /// The app name is the folder name on level above the migration directory.
+    fn get_app_name(&self) -> &str {
+        let levels: Vec<_> = self.migration_dir.components().collect();
+        levels[levels.len() - 2].as_os_str().to_str().unwrap()
+    }
+
     fn migration_paths(&self) -> Vec<PathBuf> {
         self.migrations
             .iter()
@@ -171,7 +269,32 @@ impl MigrationGroup {
             .collect()
     }
 
-    fn generate_new_migration_numbers(&mut self, last_head_migration: PathBuf) {
+    fn add_previous_migration_name(&mut self, last_head_migration: &PathBuf) {
+        let lowest_number = self
+            .migrations
+            .iter()
+            .map(|(_, migration)| migration.number)
+            .min()
+            .unwrap_or(0);
+        let migrations_lookup = self.migrations.clone();
+
+        for (number, migration) in self.migrations.iter_mut() {
+            if number == &lowest_number {
+                migration.previous_migration_name =
+                    Some(get_name_from_migration(last_head_migration).unwrap());
+            } else {
+                migration.previous_migration_name = Some(
+                    migrations_lookup
+                        .get(&(migration.number - 1))
+                        .unwrap()
+                        .name
+                        .clone(),
+                );
+            }
+        }
+    }
+
+    fn generate_new_migration_numbers(&mut self, last_head_migration: &PathBuf) {
         let last_head_migration_number = get_number_from_migration(&last_head_migration).unwrap();
         let mut new_migration_names = HashMap::new();
 
@@ -221,21 +344,34 @@ impl MigrationGroup {
     /// Uses Python AST to parse the migration files and find the dependencies array.
     /// Then it updates the entry in the dependencies array with the new migration file name.
     fn update_migration_file_dependencies(&self, dry_run: bool) -> Result<(), String> {
-        if dry_run {
-            return Ok(());
-        }
+        let app_name = self.get_app_name();
         for migration in self.migrations.values() {
-            let python_path = migration.new_full_path(&self.migration_dir).unwrap();
-            let python_source = std::fs::read_to_string(&python_path)
-                .map_err(|e| format!("Failed to read file {}: {}", python_path.display(), e))?;
-            let python_statements =
-                ast::Suite::parse(&python_source, python_path.to_str().unwrap()).unwrap(); // statements
-            println!("{:?}", python_statements);
+            let python_path = if dry_run {
+                migration.old_full_path(&self.migration_dir)
+            } else {
+                migration.new_full_path(&self.migration_dir).unwrap()
+            };
+            let (start, end) = find_migration_string_location_in_file(&python_path, app_name)?;
+            let replacement = {
+                let number = migration.new_number.unwrap() - 1;
+                let name = migration.previous_migration_name.as_ref().unwrap();
+                format!("'{:04}_{}'", number, name)
+            };
+            replace_range_in_file(
+                python_path.to_str().unwrap(),
+                start as usize,
+                end as usize,
+                &replacement,
+                dry_run,
+            )?;
         }
         Ok(())
     }
 
     fn update_max_migration_file(&self, dry_run: bool) -> Result<(), String> {
+        if dry_run {
+            println!("DRY RUN: Updating max migration file");
+        }
         Ok(())
     }
 }
@@ -258,6 +394,7 @@ impl MigrationGroup {
                             number: migration_number,
                             name: migration_name.clone(),
                             new_number: None,
+                            previous_migration_name: None,
                         },
                     );
                     found_group = true;
@@ -273,6 +410,7 @@ impl MigrationGroup {
                         number: migration_number,
                         name: migration_name,
                         new_number: None,
+                        previous_migration_name: None,
                     },
                 );
 
@@ -292,7 +430,8 @@ pub fn fix(search_path: &str, dry_run: bool) -> Result<(), String> {
     let mut migration_groups = MigrationGroup::create(migrations);
     for group in migration_groups.iter_mut() {
         if let Some(last_head_migration) = group.find_last_head_migration() {
-            group.generate_new_migration_numbers(last_head_migration);
+            group.generate_new_migration_numbers(&last_head_migration);
+            group.add_previous_migration_name(&last_head_migration);
             group.rename_files(dry_run)?;
             group.update_migration_file_dependencies(dry_run)?;
             group.update_max_migration_file(dry_run)?;
