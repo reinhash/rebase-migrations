@@ -12,7 +12,18 @@ fn main() {
         let search_path = matches.get_one::<String>(PATH).expect("Path is required");
         let dry_run = matches.get_flag(DRY_RUN);
 
-        rebase::fix(search_path, dry_run).unwrap();
+        match rebase::fix(search_path, dry_run) {
+            Ok(()) => {
+                if dry_run {
+                    println!("Dry run completed successfully.");
+                } else {
+                    println!("Rebase completed successfully.");
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+            }
+        }
     } else {
         println!("No subcommand provided. Try 'rebase-migrations fix --help'");
     }

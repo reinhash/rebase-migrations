@@ -6,7 +6,7 @@ pub const PATH: &str = "path";
 pub const PATH_SHORT: char = 'p';
 
 pub fn build() -> Command {
-    let command = Command::new("rebase-migrations")
+    Command::new("rebase-migrations")
         .version("0.1.0")
         .author("Reinhard Scheuerle")
         .about("A tool to help with migration rebasing for django.")
@@ -27,6 +27,5 @@ pub fn build() -> Command {
                         .help("Show what would be done without making changes")
                         .action(clap::ArgAction::SetTrue),
                 ),
-        );
-    command
+        )
 }
