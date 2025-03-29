@@ -76,6 +76,9 @@ fn get_number_from_migration(migration: &Path) -> Option<u32> {
 
 fn get_name_from_migration(migration: &Path) -> Option<String> {
     let file_name_str = stringify_migration_path(migration)?;
+    if !is_migration_file(&file_name_str) {
+        return None;
+    }
     if let Some(pos) = file_name_str.find('_') {
         if pos > 0 {
             let name = &file_name_str[pos + 1..];
@@ -533,4 +536,404 @@ pub fn fix(search_path: &str, dry_run: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::{TempDir, tempdir};
+
+    /// Helper function to create a test environment with temp directories
+    fn setup_test_env() -> (TempDir, PathBuf) {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let app_dir = temp_dir.path().join("test_app");
+        let migrations_dir = app_dir.join("migrations");
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+        (temp_dir, migrations_dir)
+    }
+
+    fn create_test_migration_file(dir: &Path, number: u32, name: &str, deps: &str) -> PathBuf {
+        fs::create_dir_all(dir).expect("Failed to create migration directory");
+
+        let file_path = dir.join(format!("{:04}_{}.py", number, name));
+        let content = format!(
+            r#"
+from django.db import migrations, models
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ('test_app', {}),
+    ]
+
+    operations = []
+"#,
+            deps
+        );
+        fs::write(&file_path, content).expect("Failed to write test migration file");
+        file_path
+    }
+
+    #[test]
+    fn test_is_migration_file() {
+        assert!(is_migration_file("0001_initial.py"));
+        assert!(is_migration_file("0002_auto_20230901_1234.py"));
+        assert!(!is_migration_file("__init__.py"));
+        assert!(!is_migration_file("not_a_migration.py"));
+        assert!(!is_migration_file("a001_invalid.py"));
+        assert!(!is_migration_file("_0001_invalid.py"));
+    }
+
+    #[test]
+    fn test_find_staged_migrations() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+
+        // Skip the actual git operations in this test since they're tricky in tests
+        // Just check that the function runs and returns an empty list
+        let found_migrations = find_staged_migrations(temp_dir.path());
+        assert!(found_migrations.len() == 0);
+    }
+
+    #[test]
+    fn test_stringify_migration_path() {
+        let path = Path::new("/test/0001_initial.py");
+        assert_eq!(
+            stringify_migration_path(path),
+            Some("0001_initial.py".to_string())
+        );
+
+        let path_with_filename = Path::new("/test");
+        assert!(stringify_migration_path(path_with_filename).is_some());
+    }
+
+    #[test]
+    fn test_get_number_from_migration() {
+        let path = Path::new("/test/0001_initial.py");
+        assert_eq!(get_number_from_migration(path), Some(1));
+
+        let invalid_path = Path::new("/test/not_a_migration.py");
+        assert_eq!(get_number_from_migration(invalid_path), None);
+    }
+
+    #[test]
+    fn test_get_name_from_migration() {
+        let path = Path::new("/test/0001_initial.py");
+        assert_eq!(get_name_from_migration(path), Some("initial".to_string()));
+
+        let path_no_extension = Path::new("/test/0001_initial");
+        assert_eq!(
+            get_name_from_migration(path_no_extension),
+            Some("initial".to_string())
+        );
+
+        let invalid_path = Path::new("/test/not_a_migration.py");
+        assert_eq!(get_name_from_migration(invalid_path), None);
+
+        let path_with_underscore = Path::new("/test/0001_a_migration.py");
+        assert_eq!(
+            get_name_from_migration(path_with_underscore),
+            Some("a_migration".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_migration_string_location_in_file() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let file_path = temp_dir.path().join("test_migration.py");
+        let content = r#"
+from django.db import migrations, models
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ('test_app', '0001_initial'),
+    ]
+
+    operations = []
+"#;
+        fs::write(&file_path, content).expect("Failed to write test file");
+
+        let result = find_migration_string_location_in_file(&file_path, "test_app");
+        assert!(result.is_ok());
+
+        let (start, end) = result.unwrap();
+        assert_eq!(start, 124);
+        assert_eq!(end, 138);
+
+        let invalid_file_path = temp_dir.path().join("invalid_migration.py");
+        let invalid_content = "This is not a valid migration file";
+        fs::write(&invalid_file_path, invalid_content).expect("Failed to write invalid test file");
+
+        let invalid_result = find_migration_string_location_in_file(&invalid_file_path, "test_app");
+        assert!(invalid_result.is_err());
+    }
+
+    #[test]
+    fn test_replace_range_in_file() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let file_path = temp_dir.path().join("test_file.txt");
+        let content = "Hello world!";
+        fs::write(&file_path, content).expect("Failed to write test file");
+
+        let file_path_str = file_path.to_str().unwrap();
+        let result = replace_range_in_file(file_path_str, 6, 11, "Rust", false);
+        assert!(result.is_ok());
+
+        let new_content = fs::read_to_string(&file_path).expect("Failed to read test file");
+        assert_eq!(new_content, "Hello Rust!");
+
+        let result = replace_range_in_file(file_path_str, 0, 5, "Goodbye", true);
+        assert!(result.is_ok());
+
+        let unchanged_content = fs::read_to_string(&file_path).expect("Failed to read test file");
+        assert_eq!(unchanged_content, "Hello Rust!");
+    }
+
+    #[test]
+    fn test_migration_paths() {
+        let (_, migrations_dir) = setup_test_env();
+
+        let migration = Migration {
+            number: 1,
+            name: "initial".to_string(),
+            new_number: Some(2),
+            previous_migration_name: None,
+        };
+
+        let old_path = migration.old_full_path(&migrations_dir);
+        assert_eq!(
+            old_path.file_name().unwrap().to_str().unwrap(),
+            "0001_initial.py"
+        );
+
+        let new_path = migration.new_full_path(&migrations_dir).unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_str().unwrap(),
+            "0002_initial.py"
+        );
+    }
+
+    #[test]
+    fn test_migration_group_creation() {
+        let (_, migrations_dir) = setup_test_env();
+
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        let migration1 = migrations_dir.join("0001_initial.py");
+        let migration2 = migrations_dir.join("0002_add_field.py");
+
+        fs::write(&migration1, "test content").expect("Failed to write test migration");
+        fs::write(&migration2, "test content").expect("Failed to write test migration");
+
+        let result = MigrationGroup::create(vec![migration1.clone(), migration2.clone()]);
+        assert!(result.is_ok());
+
+        let groups = result.unwrap();
+        assert_eq!(groups.len(), 1);
+
+        let group = &groups[0];
+        assert_eq!(group.migrations.len(), 2);
+        assert!(group.migrations.contains_key(&1));
+        assert!(group.migrations.contains_key(&2));
+        assert_eq!(group.migration_dir, migrations_dir);
+    }
+
+    #[test]
+    fn test_find_highest_migration_number() {
+        let (_, migrations_dir) = setup_test_env();
+
+        let mut migrations = HashMap::new();
+        migrations.insert(
+            1,
+            Migration {
+                number: 1,
+                name: "initial".to_string(),
+                new_number: None,
+                previous_migration_name: None,
+            },
+        );
+        migrations.insert(
+            3,
+            Migration {
+                number: 3,
+                name: "add_field".to_string(),
+                new_number: None,
+                previous_migration_name: None,
+            },
+        );
+
+        let group = MigrationGroup {
+            migrations,
+            migration_dir: migrations_dir,
+            migration_name_changes: None,
+        };
+
+        assert_eq!(group.find_highest_migration_number(), Some(3));
+    }
+
+    #[test]
+    fn test_get_app_name() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let app_dir = temp_dir.path().join("app_name");
+        fs::create_dir_all(&app_dir).expect("Failed to create app directory");
+
+        let migrations_dir = app_dir.join("migrations");
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        let group = MigrationGroup {
+            migrations: HashMap::new(),
+            migration_dir: migrations_dir,
+            migration_name_changes: None,
+        };
+
+        assert_eq!(group.get_app_name(), "app_name");
+    }
+
+    #[test]
+    fn test_generate_new_migration_numbers() {
+        let (_, migrations_dir) = setup_test_env();
+
+        let last_head_migration =
+            create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
+
+        let mut migrations = HashMap::new();
+        migrations.insert(
+            2,
+            Migration {
+                number: 2,
+                name: "add_field".to_string(),
+                new_number: None,
+                previous_migration_name: None,
+            },
+        );
+        migrations.insert(
+            3,
+            Migration {
+                number: 3,
+                name: "remove_field".to_string(),
+                new_number: None,
+                previous_migration_name: None,
+            },
+        );
+
+        let mut group = MigrationGroup {
+            migrations,
+            migration_dir: migrations_dir,
+            migration_name_changes: None,
+        };
+
+        let result = group.generate_new_migration_numbers(&last_head_migration);
+        assert!(result.is_ok());
+
+        assert_eq!(group.migrations.get(&2).unwrap().new_number, Some(2));
+        assert_eq!(group.migrations.get(&3).unwrap().new_number, Some(3));
+
+        assert!(group.migration_name_changes.is_some());
+        let name_changes = group.migration_name_changes.unwrap();
+        assert_eq!(name_changes.get("add_field").unwrap(), "0002_add_field");
+        assert_eq!(
+            name_changes.get("remove_field").unwrap(),
+            "0003_remove_field"
+        );
+    }
+
+    #[test]
+    fn test_add_previous_migration_name() {
+        let (_, migrations_dir) = setup_test_env();
+
+        let last_head_migration =
+            create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
+
+        let mut migrations = HashMap::new();
+        migrations.insert(
+            2,
+            Migration {
+                number: 2,
+                name: "add_field".to_string(),
+                new_number: None,
+                previous_migration_name: None,
+            },
+        );
+        migrations.insert(
+            3,
+            Migration {
+                number: 3,
+                name: "remove_field".to_string(),
+                new_number: None,
+                previous_migration_name: None,
+            },
+        );
+
+        let mut group = MigrationGroup {
+            migrations,
+            migration_dir: migrations_dir,
+            migration_name_changes: None,
+        };
+
+        let result = group.add_previous_migration_name(&last_head_migration);
+        assert!(result.is_ok());
+
+        assert_eq!(
+            group.migrations.get(&2).unwrap().previous_migration_name,
+            Some("initial".to_string())
+        );
+        assert_eq!(
+            group.migrations.get(&3).unwrap().previous_migration_name,
+            Some("add_field".to_string())
+        );
+    }
+
+    #[test]
+    fn test_integration() {
+        let (_, migrations_dir) = setup_test_env();
+
+        let last_head_migration =
+            create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
+        let staged_migration1 =
+            create_test_migration_file(&migrations_dir, 2, "add_field", "'0001_initial'");
+        let staged_migration2 =
+            create_test_migration_file(&migrations_dir, 3, "remove_field", "'0002_add_field'");
+
+        let result = MigrationGroup::create(vec![staged_migration1, staged_migration2]);
+        assert!(result.is_ok());
+
+        let mut groups = result.unwrap();
+        assert_eq!(groups.len(), 1);
+
+        let found_head = groups[0].find_last_head_migration();
+        assert!(found_head.is_some());
+        assert_eq!(
+            found_head.unwrap().file_name().unwrap(),
+            last_head_migration.file_name().unwrap()
+        );
+
+        let result = groups[0].generate_new_migration_numbers(&last_head_migration);
+        assert!(result.is_ok());
+
+        let result = groups[0].add_previous_migration_name(&last_head_migration);
+        assert!(result.is_ok());
+
+        let result = groups[0].rename_files(true);
+        assert!(result.is_ok());
+
+        for migration in groups[0].migrations.values() {
+            let old_path = migration.old_full_path(&migrations_dir);
+            assert!(old_path.exists());
+        }
+    }
+
+    #[test]
+    fn test_fix() {
+        let (temp_dir, _) = setup_test_env();
+
+        // Create migrations inside temp_dir rather than using the returned migrations_dir
+        // since we want to test the fix() function which expects the repo root path
+        let app_dir = temp_dir.path().join("test_app");
+        let migrations_dir = app_dir.join("migrations");
+
+        create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
+        create_test_migration_file(&migrations_dir, 2, "add_field", "'0001_initial'");
+
+        let result = fix(temp_dir.path().to_str().unwrap(), true);
+        assert!(result.is_ok());
+    }
 }
