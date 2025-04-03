@@ -2,29 +2,25 @@ mod cli;
 mod rebase;
 
 use cli::build as cli_builder;
-use cli::{DRY_RUN, FIX, PATH};
+use cli::{DRY_RUN, PATH};
 
 fn main() {
     let command = cli_builder();
     let matches = command.get_matches();
 
-    if let Some(matches) = matches.subcommand_matches(FIX) {
-        let search_path = matches.get_one::<String>(PATH).expect("Path is required");
-        let dry_run = matches.get_flag(DRY_RUN);
+    let search_path = matches.get_one::<String>(PATH).expect("Path is required");
+    let dry_run = matches.get_flag(DRY_RUN);
 
-        match rebase::fix(search_path, dry_run) {
-            Ok(()) => {
-                if dry_run {
-                    println!("Dry run completed successfully.");
-                } else {
-                    println!("Rebase completed successfully.");
-                }
-            }
-            Err(e) => {
-                eprintln!("Error: {e}");
+    match rebase::fix(search_path, dry_run) {
+        Ok(()) => {
+            if dry_run {
+                println!("Dry run completed successfully.");
+            } else {
+                println!("Rebase completed successfully.");
             }
         }
-    } else {
-        println!("No subcommand provided. Try 'rebase-migrations fix --help'");
+        Err(e) => {
+            eprintln!("Error: {e}");
+        }
     }
 }
