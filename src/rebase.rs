@@ -529,6 +529,9 @@ pub fn fix(search_path: &str, dry_run: bool) -> Result<(), String> {
     }
     let migrations = find_staged_migrations(Path::new(search_path));
     let mut migration_groups = MigrationGroup::create(migrations)?;
+    if migration_groups.is_empty() {
+        return Err("No staged migrations found.".to_string());
+    }
     for group in &mut migration_groups {
         if let Some(last_head_migration) = group.find_last_head_migration() {
             group.generate_new_migration_numbers(&last_head_migration)?;

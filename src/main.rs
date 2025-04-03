@@ -20,7 +20,7 @@ fn main() {
             }
         }
         Err(e) => {
-            eprintln!("Error: {e}");
+            eprintln!("{e}");
         }
     }
 }
