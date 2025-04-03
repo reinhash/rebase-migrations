@@ -441,6 +441,9 @@ impl MigrationGroup {
             .migration_dir
             .join("max_migration")
             .with_extension("txt");
+        if !max_migration_path.exists() {
+            return Ok(());
+        }
         let content = format!(
             "{:04}_{}\n",
             max_migration
