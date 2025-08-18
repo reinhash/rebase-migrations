@@ -936,10 +936,53 @@ class Migration(migrations.Migration):
         let app_dir = temp_dir.path().join("test_app");
         let migrations_dir = app_dir.join("migrations");
 
-        create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
-        create_test_migration_file(&migrations_dir, 2, "add_field", "'0001_initial'");
+        // Initialize a git repository
+        let repo = Repository::init(temp_dir.path()).expect("Failed to create git repo");
 
+        // Create some existing "head" migrations (not staged) that we'll rebase against
+        // Django migrations always start with 0001_initial
+        create_test_migration_file(&migrations_dir, 1, "initial", "None");
+        create_test_migration_file(&migrations_dir, 5, "existing_head", "'0001_initial'");
+
+        // Create new migrations that need to be rebased (these will be staged)
+        // These have lower numbers than the head migration, so they'll need renumbering
+        let staged_migration1 =
+            create_test_migration_file(&migrations_dir, 2, "new_feature", "'0001_initial'");
+        let staged_migration2 =
+            create_test_migration_file(&migrations_dir, 3, "another_feature", "'0002_new_feature'");
+
+        // Add the new migrations to git index (stage them)
+        let mut index = repo.index().expect("Failed to get git index");
+
+        // Get relative paths for staging
+        let staged_path1 = staged_migration1.strip_prefix(temp_dir.path()).unwrap();
+        let staged_path2 = staged_migration2.strip_prefix(temp_dir.path()).unwrap();
+
+        index
+            .add_path(staged_path1)
+            .expect("Failed to stage migration 1");
+        index
+            .add_path(staged_path2)
+            .expect("Failed to stage migration 2");
+        index.write().expect("Failed to write index");
+
+        // Now test the fix function - it should find the staged migrations and process them
         let result = fix(temp_dir.path().to_str().unwrap(), true);
         assert!(result.is_ok());
+
+        // Verify that the staged migrations were found and would be processed
+        // In dry-run mode, files aren't actually renamed, but we can verify the logic worked
+        // by checking that find_staged_migrations finds our staged files
+        let found_migrations = find_staged_migrations(temp_dir.path());
+        assert_eq!(found_migrations.len(), 2);
+
+        // Verify the found migrations are the ones we staged
+        let migration_names: Vec<String> = found_migrations
+            .iter()
+            .filter_map(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .collect();
+        assert!(migration_names.contains(&"0002_new_feature.py".to_string()));
+        assert!(migration_names.contains(&"0003_another_feature.py".to_string()));
     }
 }
