@@ -1,5 +1,6 @@
 mod cli;
 mod rebase;
+mod utils;
 
 use cli::build as cli_builder;
 use cli::{DRY_RUN, PATH};
