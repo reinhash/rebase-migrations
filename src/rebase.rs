@@ -95,82 +95,143 @@ fn find_migration_string_location_in_file(
     python_path: &PathBuf,
     app_name: &str,
 ) -> Result<(u32, u32), String> {
-    let python_source = std::fs::read_to_string(python_path)
-        .map_err(|e| format!("Failed to read file {}: {}", python_path.display(), e))?;
-    let python_statements = ast::Suite::parse(
-        &python_source,
-        python_path
-            .to_str()
-            .expect("Failed to convert path to string"),
-    )
-    .map_err(|e| format!("Failed to parse python statements: {e}"))?;
+    let python_source = read_python_file(python_path)?;
+    let python_statements = parse_python_ast(&python_source, python_path)?;
+    
     for statement in python_statements {
-        if let ast::Stmt::ClassDef(class) = statement {
-            if &class.name.to_string() == "Migration" {
-                for item in class.body {
-                    if let ast::Stmt::Assign(assign) = item {
-                        let mut found = false;
-                        for target in &assign.targets {
-                            if let ast::Expr::Name(name) = &target {
-                                if &name.id == "dependencies" {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if found {
-                            if let ast::Expr::List(dep_list) = &assign.value.as_ref() {
-                                for tuple in &dep_list.elts {
-                                    if let ast::Expr::Tuple(tuple_items) = tuple {
-                                        let django_app = match tuple_items.elts.first() {
-                                            Some(expr) => match expr {
-                                                ast::Expr::Constant(django_app) => {
-                                                    django_app.value.as_str()
-                                                        .expect("Since we are using a string, we should be able to convert it to a str")
-                                                }
-                                                _ => return Err(format!(
-                                                    "Expected a django app name as first item of the tuple in {}",
-                                                    python_path.display()
-                                                )),
-                                            },
-                                            None => return Err(format!(
-                                                "Missing first element in dependencies tuple in {}",
-                                                python_path.display()
-                                            )),
-                                        };
-
-                                        // we only want to update the dependencies for the current app
-                                        if django_app != app_name {
-                                            continue;
-                                        }
-
-                                        let migration_name_expression = tuple_items.elts.get(1)
-                                            .ok_or_else(|| format!(
-                                                "Missing migration name in dependencies tuple in {}",
-                                                python_path.display()
-                                            ))?;
-
-                                        if let ast::Expr::Constant(mig_const) =
-                                            migration_name_expression
-                                        {
-                                            let range = mig_const.range;
-                                            let start = u32::from(range.start());
-                                            let end = u32::from(range.end());
-                                            return Ok((start, end));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        if let Some(migration_class) = extract_migration_class(statement) {
+            if let Some(location) = find_dependency_string_location(&migration_class, app_name, python_path)? {
+                return Ok(location);
             }
         }
     }
+    
     Err(format!(
         "Failed to find migration string location in file {}",
         python_path.display()
     ))
+}
+
+fn read_python_file(python_path: &PathBuf) -> Result<String, String> {
+    std::fs::read_to_string(python_path)
+        .map_err(|e| format!("Failed to read file {}: {}", python_path.display(), e))
+}
+
+fn parse_python_ast(python_source: &str, python_path: &PathBuf) -> Result<ast::Suite, String> {
+    ast::Suite::parse(
+        python_source,
+        python_path
+            .to_str()
+            .expect("Failed to convert path to string"),
+    )
+    .map_err(|e| format!("Failed to parse python statements: {e}"))
+}
+
+fn extract_migration_class(statement: ast::Stmt) -> Option<ast::StmtClassDef> {
+    if let ast::Stmt::ClassDef(class) = statement {
+        if &class.name.to_string() == "Migration" {
+            return Some(class);
+        }
+    }
+    None
+}
+
+fn find_dependency_string_location(
+    migration_class: &ast::StmtClassDef,
+    app_name: &str,
+    python_path: &PathBuf,
+) -> Result<Option<(u32, u32)>, String> {
+    for item in &migration_class.body {
+        if let Some(dependencies_assignment) = extract_dependencies_assignment(item) {
+            if let Some(location) = process_dependencies_list(&dependencies_assignment, app_name, python_path)? {
+                return Ok(Some(location));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn extract_dependencies_assignment(item: &ast::Stmt) -> Option<&ast::StmtAssign> {
+    if let ast::Stmt::Assign(assign) = item {
+        if is_dependencies_assignment(assign) {
+            return Some(assign);
+        }
+    }
+    None
+}
+
+fn is_dependencies_assignment(assign: &ast::StmtAssign) -> bool {
+    assign.targets.iter().any(|target| {
+        if let ast::Expr::Name(name) = target {
+            &name.id == "dependencies"
+        } else {
+            false
+        }
+    })
+}
+
+fn process_dependencies_list(
+    assignment: &ast::StmtAssign,
+    app_name: &str,
+    python_path: &PathBuf,
+) -> Result<Option<(u32, u32)>, String> {
+    if let ast::Expr::List(dep_list) = assignment.value.as_ref() {
+        for tuple in &dep_list.elts {
+            if let Some(location) = process_dependency_tuple(tuple, app_name, python_path)? {
+                return Ok(Some(location));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn process_dependency_tuple(
+    tuple: &ast::Expr,
+    app_name: &str,
+    python_path: &PathBuf,
+) -> Result<Option<(u32, u32)>, String> {
+    if let ast::Expr::Tuple(tuple_items) = tuple {
+        let django_app = extract_django_app_name(&tuple_items.elts, python_path)?;
+        
+        if django_app != app_name {
+            return Ok(None);
+        }
+        
+        let migration_name_expr = tuple_items.elts.get(1)
+            .ok_or_else(|| format!(
+                "Missing migration name in dependencies tuple in {}",
+                python_path.display()
+            ))?;
+        
+        if let ast::Expr::Constant(mig_const) = migration_name_expr {
+            let range = mig_const.range;
+            let start = u32::from(range.start());
+            let end = u32::from(range.end());
+            return Ok(Some((start, end)));
+        }
+    }
+    Ok(None)
+}
+
+fn extract_django_app_name<'a>(tuple_elements: &'a [ast::Expr], python_path: &PathBuf) -> Result<&'a str, String> {
+    match tuple_elements.first() {
+        Some(ast::Expr::Constant(django_app)) => {
+            django_app.value.as_str()
+                .map(|s| s.as_str())
+                .ok_or_else(|| format!(
+                    "Expected a string as django app name in {}",
+                    python_path.display()
+                ))
+        }
+        Some(_) => Err(format!(
+            "Expected a django app name as first item of the tuple in {}",
+            python_path.display()
+        )),
+        None => Err(format!(
+            "Missing first element in dependencies tuple in {}",
+            python_path.display()
+        )),
+    }
 }
 
 fn replace_range_in_file(
