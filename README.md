@@ -1,6 +1,6 @@
 # Django Migration Rebase Tool
 
-A Rust CLI tool that automatically renumbers Django migration files to resolve conflicts during git rebases.
+A Rust CLI tool that automatically renumbers Django migration files to resolve conflicts during git rebases. Designed to work seamlessly with [django-linear-migrations](https://github.com/adamchainz/django-linear-migrations).
 
 ## The Problem
 
@@ -32,25 +32,25 @@ This tool automatically detects and renumbers conflicting migrations during reba
 
 ### Download Pre-built Binary (Recommended)
 
-Download the latest binary for your platform from the [releases page](https://github.com/yourusername/rebase-migrations/releases):
+Download the latest binary for your platform from the [releases page](https://github.com/reinhash/rebase-migrations/releases):
 
 #### macOS (Intel)
 ```bash
-curl -L https://github.com/yourusername/rebase-migrations/releases/latest/download/rebase-migrations-macos-x86_64 -o rebase-migrations
+curl -L https://github.com/reinhash/rebase-migrations/releases/latest/download/rebase-migrations-macos-x86_64 -o rebase-migrations
 chmod +x rebase-migrations
 sudo mv rebase-migrations /usr/local/bin/
 ```
 
 #### macOS (Apple Silicon)
 ```bash
-curl -L https://github.com/yourusername/rebase-migrations/releases/latest/download/rebase-migrations-macos-aarch64 -o rebase-migrations
+curl -L https://github.com/reinhash/rebase-migrations/releases/latest/download/rebase-migrations-macos-aarch64 -o rebase-migrations
 chmod +x rebase-migrations
 sudo mv rebase-migrations /usr/local/bin/
 ```
 
 #### Linux (x86_64)
 ```bash
-curl -L https://github.com/yourusername/rebase-migrations/releases/latest/download/rebase-migrations-linux-x86_64 -o rebase-migrations
+curl -L https://github.com/reinhash/rebase-migrations/releases/latest/download/rebase-migrations-linux-x86_64 -o rebase-migrations
 chmod +x rebase-migrations
 sudo mv rebase-migrations /usr/local/bin/
 ```
@@ -61,7 +61,7 @@ Download `rebase-migrations-windows-x86_64.exe` from the releases page and add i
 ### Install from Source (Requires Rust)
 
 ```bash
-cargo install --git https://github.com/yourusername/rebase-migrations
+cargo install --git https://github.com/reinhash/rebase-migrations
 ```
 
 ## Usage
@@ -131,6 +131,9 @@ myapp/migrations/
 - Git repository
 - Django project with standard migration structure
 - Python migration files following Django naming convention (`NNNN_name.py`)
+- **[django-linear-migrations](https://github.com/adamchainz/django-linear-migrations)** package installed and configured
+
+This tool automatically updates the `max_migration.txt` files that `django-linear-migrations` uses to track the latest migration in each app.
 
 ## Contributing
 
@@ -144,7 +147,7 @@ myapp/migrations/
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/rebase-migrations
+git clone https://github.com/reinhash/rebase-migrations
 cd rebase-migrations
 
 # Run tests
