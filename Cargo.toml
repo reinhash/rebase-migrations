@@ -2,6 +2,15 @@
 name = "rebase-migrations"
 version = "0.1.0"
 edition = "2024"
+description = "A CLI tool to automatically renumber Django migration files during git rebases"
+authors = ["Reinhard Scheuerle <reinhard.scheuerle@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/reinhash/rebase-migrations"
+homepage = "https://github.com/reinhash/rebase-migrations"
+documentation = "https://github.com/reinhash/rebase-migrations#readme"
+keywords = ["django", "migrations", "git", "rebase", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
 
 [dependencies]
 clap = "4.5.32"
