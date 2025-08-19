@@ -1,4 +1,3 @@
-use git2::Repository;
 use rustpython_parser::{Parse, ast};
 use std::{
     collections::HashMap,
@@ -6,10 +5,9 @@ use std::{
 };
 
 use crate::utils::{
-    find_relevant_migrations, get_name_from_migration, get_number_from_migration, 
-    is_migration_file, replace_range_in_file, stringify_migration_path
+    find_relevant_migrations, get_name_from_migration, get_number_from_migration,
+    is_migration_file, replace_range_in_file,
 };
-
 
 fn find_migration_string_location_in_file(
     python_path: &PathBuf,
@@ -28,7 +26,7 @@ impl MigrationParser {
     fn new(python_path: &PathBuf) -> Result<Self, String> {
         let python_source = std::fs::read_to_string(python_path)
             .map_err(|e| format!("Failed to read file {}: {}", python_path.display(), e))?;
-        
+
         let ast = ast::Suite::parse(
             &python_source,
             python_path
@@ -36,31 +34,31 @@ impl MigrationParser {
                 .expect("Failed to convert path to string"),
         )
         .map_err(|e| format!("Failed to parse python statements: {e}"))?;
-        
+
         Ok(Self {
             file_path: python_path.clone(),
             ast,
         })
     }
-    
+
     fn find_dependency_location_for_app(&self, app_name: &str) -> Result<(u32, u32), String> {
         let migration_class = self.find_migration_class()?;
         let dependencies_assignment = self.find_dependencies_assignment(migration_class)?;
         let dependency_tuples = self.extract_dependency_tuples(dependencies_assignment)?;
-        
+
         for tuple in dependency_tuples {
             if let Some(location) = self.try_extract_location_from_tuple(tuple, app_name)? {
                 return Ok(location);
             }
         }
-        
+
         Err(format!(
             "No dependency found for app '{}' in file {}",
             app_name,
             self.file_path.display()
         ))
     }
-    
+
     fn find_migration_class(&self) -> Result<&ast::StmtClassDef, String> {
         for statement in &self.ast {
             if let ast::Stmt::ClassDef(class) = statement {
@@ -74,8 +72,11 @@ impl MigrationParser {
             self.file_path.display()
         ))
     }
-    
-    fn find_dependencies_assignment<'a>(&self, migration_class: &'a ast::StmtClassDef) -> Result<&'a ast::StmtAssign, String> {
+
+    fn find_dependencies_assignment<'a>(
+        &self,
+        migration_class: &'a ast::StmtClassDef,
+    ) -> Result<&'a ast::StmtAssign, String> {
         for item in &migration_class.body {
             if let ast::Stmt::Assign(assign) = item {
                 if self.is_dependencies_assignment(assign) {
@@ -88,14 +89,18 @@ impl MigrationParser {
             self.file_path.display()
         ))
     }
-    
+
     fn is_dependencies_assignment(&self, assign: &ast::StmtAssign) -> bool {
-        assign.targets.iter().any(|target| {
-            matches!(target, ast::Expr::Name(name) if &name.id == "dependencies")
-        })
+        assign
+            .targets
+            .iter()
+            .any(|target| matches!(target, ast::Expr::Name(name) if &name.id == "dependencies"))
     }
-    
-    fn extract_dependency_tuples<'a>(&self, assignment: &'a ast::StmtAssign) -> Result<&'a Vec<ast::Expr>, String> {
+
+    fn extract_dependency_tuples<'a>(
+        &self,
+        assignment: &'a ast::StmtAssign,
+    ) -> Result<&'a Vec<ast::Expr>, String> {
         match assignment.value.as_ref() {
             ast::Expr::List(dep_list) => Ok(&dep_list.elts),
             _ => Err(format!(
@@ -104,7 +109,7 @@ impl MigrationParser {
             )),
         }
     }
-    
+
     fn try_extract_location_from_tuple(
         &self,
         tuple_expr: &ast::Expr,
@@ -114,18 +119,19 @@ impl MigrationParser {
             ast::Expr::Tuple(tuple) => &tuple.elts,
             _ => return Ok(None), // Skip non-tuple elements
         };
-        
+
         let app_name = self.extract_app_name_from_tuple(tuple_items)?;
         if app_name != target_app_name {
             return Ok(None);
         }
-        
-        let migration_name_expr = tuple_items.get(1)
-            .ok_or_else(|| format!(
+
+        let migration_name_expr = tuple_items.get(1).ok_or_else(|| {
+            format!(
                 "Missing migration name in dependencies tuple in {}",
                 self.file_path.display()
-            ))?;
-        
+            )
+        })?;
+
         match migration_name_expr {
             ast::Expr::Constant(constant) => {
                 let range = constant.range;
@@ -137,17 +143,22 @@ impl MigrationParser {
             )),
         }
     }
-    
-    fn extract_app_name_from_tuple<'a>(&self, tuple_elements: &'a [ast::Expr]) -> Result<&'a str, String> {
+
+    fn extract_app_name_from_tuple<'a>(
+        &self,
+        tuple_elements: &'a [ast::Expr],
+    ) -> Result<&'a str, String> {
         match tuple_elements.first() {
-            Some(ast::Expr::Constant(django_app)) => {
-                django_app.value.as_str()
-                    .map(|s| s.as_str())
-                    .ok_or_else(|| format!(
+            Some(ast::Expr::Constant(django_app)) => django_app
+                .value
+                .as_str()
+                .map(|s| s.as_str())
+                .ok_or_else(|| {
+                    format!(
                         "Expected a string as django app name in {}",
                         self.file_path.display()
-                    ))
-            }
+                    )
+                }),
             Some(_) => Err(format!(
                 "Expected a django app name as first item of the tuple in {}",
                 self.file_path.display()
@@ -159,7 +170,6 @@ impl MigrationParser {
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 struct Migration {
@@ -947,7 +957,7 @@ class Migration(migrations.Migration):
             .filter_map(|path| path.file_name())
             .map(|name| name.to_string_lossy().to_string())
             .collect();
-        
+
         // Should include all 4 migration files: 2 staged + 2 untracked
         assert!(migration_names.contains(&"0001_initial.py".to_string())); // untracked
         assert!(migration_names.contains(&"0002_new_feature.py".to_string())); // staged
