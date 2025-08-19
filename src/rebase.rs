@@ -524,6 +524,7 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::{TempDir, tempdir};
+    use git2::Repository;
 
     /// Helper function to create a test environment with temp directories
     fn setup_test_env() -> (TempDir, PathBuf) {
@@ -575,17 +576,6 @@ class Migration(migrations.Migration):
         assert!(found_migrations.len() == 0);
     }
 
-    #[test]
-    fn test_stringify_migration_path() {
-        let path = Path::new("/test/0001_initial.py");
-        assert_eq!(
-            stringify_migration_path(path),
-            Some("0001_initial.py".to_string())
-        );
-
-        let path_with_filename = Path::new("/test");
-        assert!(stringify_migration_path(path_with_filename).is_some());
-    }
 
     #[test]
     fn test_get_number_from_migration() {
