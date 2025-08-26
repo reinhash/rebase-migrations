@@ -210,45 +210,35 @@ impl MigrationGroup {
     /// It could be the same.
     /// But it can never be larger.
     fn find_last_head_migration(&self) -> Option<PathBuf> {
-        let files = self.sorted_files_in_dir();
+        let files = self.sorted_migration_files_in_dir();
         let migration_paths = self.migration_paths();
         let mut highest_number = 0;
         let mut last_head_migration = None;
         for file in files {
-            if let Some(file_name) = file.file_name() {
-                let file_path = file.clone();
-                if migration_paths.contains(&file_path) {
-                    // We could have migrations with much higher numbers
-                    // that are coming from our branch. But we are only
-                    // interested in the last migration of the branch
-                    // that we rebase against.
-                    continue;
-                }
-                let file_name_str = file_name.to_string_lossy();
-                if is_migration_file(&file_name_str) {
-                    let number = get_number_from_migration(&file)?;
-                    if number >= highest_number {
-                        highest_number = number;
-                        last_head_migration = Some(file_path);
-                    }
-                }
+            if migration_paths.contains(&file) {
+                // We could have migrations with much higher numbers
+                // that are coming from our branch. But we are only
+                // interested in the last migration of the branch
+                // that we rebase against.
+                continue;
+            }
+            let number = get_number_from_migration(&file)?;
+            if number >= highest_number {
+                highest_number = number;
+                last_head_migration = Some(file);
             }
         }
         last_head_migration
     }
 
     /// Finds all current files in the migration directory.
-    fn sorted_files_in_dir(&self) -> Vec<PathBuf> {
+    fn sorted_migration_files_in_dir(&self) -> Vec<PathBuf> {
         let dir = self.migration_dir.clone();
         let mut files = Vec::new();
         if let Ok(entries) = dir.read_dir() {
             for entry in entries.flatten() {
                 if let Some(file_name) = entry.file_name().to_str() {
-                    if std::path::Path::new(file_name)
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
-                        && file_name != "__init__.py"
-                    {
+                    if is_migration_file(file_name) {
                         files.push(entry.path());
                     }
                 }
@@ -522,9 +512,9 @@ pub fn fix(search_path: &str, dry_run: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git2::Repository;
     use std::fs;
     use tempfile::{TempDir, tempdir};
-    use git2::Repository;
 
     /// Helper function to create a test environment with temp directories
     fn setup_test_env() -> (TempDir, PathBuf) {
@@ -575,7 +565,6 @@ class Migration(migrations.Migration):
         let result = find_relevant_migrations(temp_dir.path());
         assert!(result.is_err());
     }
-
 
     #[test]
     fn test_get_number_from_migration() {
