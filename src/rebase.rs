@@ -525,22 +525,41 @@ mod tests {
         (temp_dir, migrations_dir)
     }
 
-    fn create_test_migration_file(dir: &Path, number: u32, name: &str, deps: &str) -> PathBuf {
+    fn create_test_migration_file(
+        dir: &Path,
+        number: u32,
+        name: &str,
+        dependencies: Vec<(&str, &str)>,
+    ) -> PathBuf {
         fs::create_dir_all(dir).expect("Failed to create migration directory");
 
         let file_path = dir.join(format!("{:04}_{}.py", number, name));
+
+        // Generate dependency lines
+        let dependency_lines = if dependencies.is_empty() {
+            String::new()
+        } else {
+            dependencies
+                .iter()
+                .map(|(dep_app, dep_migration)| {
+                    format!("        ('{}', {}),", dep_app, dep_migration)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
         let content = format!(
             r#"
 from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('test_app', {}),
+{}
     ]
 
     operations = []
 "#,
-            deps
+            dependency_lines
         );
         fs::write(&file_path, content).expect("Failed to write test migration file");
         file_path
@@ -752,8 +771,12 @@ class Migration(migrations.Migration):
     fn test_generate_new_migration_numbers() {
         let (_, migrations_dir) = setup_test_env();
 
-        let last_head_migration =
-            create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
+        let last_head_migration = create_test_migration_file(
+            &migrations_dir,
+            1,
+            "initial",
+            vec![("test_app", "'0000_manual'")],
+        );
 
         let mut migrations = HashMap::new();
         migrations.insert(
@@ -800,8 +823,12 @@ class Migration(migrations.Migration):
     fn test_add_previous_migration_name() {
         let (_, migrations_dir) = setup_test_env();
 
-        let last_head_migration =
-            create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
+        let last_head_migration = create_test_migration_file(
+            &migrations_dir,
+            1,
+            "initial",
+            vec![("test_app", "'0000_manual'")],
+        );
 
         let mut migrations = HashMap::new();
         migrations.insert(
@@ -846,12 +873,24 @@ class Migration(migrations.Migration):
     fn test_integration() {
         let (_, migrations_dir) = setup_test_env();
 
-        let last_head_migration =
-            create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
-        let staged_migration1 =
-            create_test_migration_file(&migrations_dir, 2, "add_field", "'0001_initial'");
-        let staged_migration2 =
-            create_test_migration_file(&migrations_dir, 3, "remove_field", "'0002_add_field'");
+        let last_head_migration = create_test_migration_file(
+            &migrations_dir,
+            1,
+            "initial",
+            vec![("test_app", "'0000_manual'")],
+        );
+        let staged_migration1 = create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("test_app", "'0001_initial'")],
+        );
+        let staged_migration2 = create_test_migration_file(
+            &migrations_dir,
+            3,
+            "remove_field",
+            vec![("test_app", "'0002_add_field'")],
+        );
 
         let result = MigrationGroup::create(vec![staged_migration1, staged_migration2]);
         assert!(result.is_ok());
@@ -895,15 +934,28 @@ class Migration(migrations.Migration):
 
         // Create some existing "head" migrations (not staged) that we'll rebase against
         // Django migrations always start with 0001_initial
-        create_test_migration_file(&migrations_dir, 1, "initial", "None");
-        create_test_migration_file(&migrations_dir, 5, "existing_head", "'0001_initial'");
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            5,
+            "existing_head",
+            vec![("test_app", "'0001_initial'")],
+        );
 
         // Create new migrations that need to be rebased (these will be staged)
         // These have lower numbers than the head migration, so they'll need renumbering
-        let staged_migration1 =
-            create_test_migration_file(&migrations_dir, 2, "new_feature", "'0001_initial'");
-        let staged_migration2 =
-            create_test_migration_file(&migrations_dir, 3, "another_feature", "'0002_new_feature'");
+        let staged_migration1 = create_test_migration_file(
+            &migrations_dir,
+            2,
+            "new_feature",
+            vec![("test_app", "'0001_initial'")],
+        );
+        let staged_migration2 = create_test_migration_file(
+            &migrations_dir,
+            3,
+            "another_feature",
+            vec![("test_app", "'0002_new_feature'")],
+        );
 
         // Add the new migrations to git index (stage them)
         let mut index = repo.index().expect("Failed to get git index");
@@ -944,5 +996,74 @@ class Migration(migrations.Migration):
         assert!(migration_names.contains(&"0002_new_feature.py".to_string())); // staged
         assert!(migration_names.contains(&"0003_another_feature.py".to_string())); // staged  
         assert!(migration_names.contains(&"0005_existing_head.py".to_string())); // untracked
+    }
+
+    #[test]
+    fn test_cross_app_dependency_bug() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let repo = Repository::init(temp_dir.path()).expect("Failed to create git repo");
+
+        // Create app_a with a migration that will be staged and renamed
+        let app_a_dir = temp_dir.path().join("app_a");
+        let app_a_migrations_dir = app_a_dir.join("migrations");
+        fs::create_dir_all(&app_a_migrations_dir)
+            .expect("Failed to create app_a migrations directory");
+
+        // Create app_b with a migration that depends on app_a and is not staged
+        let app_b_dir = temp_dir.path().join("app_b");
+        let app_b_migrations_dir = app_b_dir.join("migrations");
+        fs::create_dir_all(&app_b_migrations_dir)
+            .expect("Failed to create app_b migrations directory");
+
+        // Create existing "head" migration in app_a (not staged)
+        create_test_migration_file(&app_a_migrations_dir, 1, "initial", vec![]);
+
+        // Create existing head migration to rebase against (higher number)
+        create_test_migration_file(
+            &app_a_migrations_dir,
+            5,
+            "existing_head",
+            vec![("app_a", "'0001_initial'")],
+        );
+
+        // Create the migration in app_a that will be staged and renamed (0002 -> 0006 after rebase)
+        let app_a_staged_migration = create_test_migration_file(
+            &app_a_migrations_dir,
+            2,
+            "create_model",
+            vec![("app_a", "'0001_initial'")],
+        );
+
+        // Create initial migration for app_b
+        create_test_migration_file(&app_b_migrations_dir, 1, "initial", vec![]);
+
+        // Create app_b migration that depends on BOTH apps (NOT staged - this is the key!)
+        // This demonstrates cross-app dependencies: depends on app_a's migration AND app_b's initial migration
+        let app_b_unstaged_migration = create_test_migration_file(
+            &app_b_migrations_dir,
+            3,
+            "use_model",
+            vec![
+                ("app_a", "'0002_create_model'"), // This dependency will be BROKEN after rebase!
+                ("app_b", "'0001_initial'"),      // Internal dependency within app_b
+            ],
+        );
+
+        // Stage ONLY the app_a migration (app_b migration remains unstaged)
+        let mut index = repo.index().expect("Failed to get git index");
+        let app_a_relative_path = app_a_staged_migration
+            .strip_prefix(temp_dir.path())
+            .expect("Failed to get relative path");
+        index
+            .add_path(app_a_relative_path)
+            .expect("Failed to stage app_a migration");
+        index.write().expect("Failed to write index");
+
+        // Run the rebase tool
+        let _result = fix(temp_dir.path().to_str().unwrap(), false);
+        let app_b_content =
+            fs::read_to_string(&app_b_unstaged_migration).expect("Failed to read app_b migration");
+
+        todo!()
     }
 }
