@@ -502,7 +502,7 @@ pub fn fix(search_path: &str, dry_run: bool) -> Result<(), String> {
     if dry_run {
         println!("Dry run detected. No changes will be made.");
     }
-    let migrations = find_relevant_migrations(Path::new(search_path));
+    let migrations = find_relevant_migrations(Path::new(search_path))?;
     let mut migration_groups = MigrationGroup::create(migrations)?;
     if migration_groups.is_empty() {
         return Err("No staged migrations found.".to_string());
@@ -571,9 +571,9 @@ class Migration(migrations.Migration):
         let temp_dir = tempdir().expect("Failed to create temp directory");
 
         // Skip the actual git operations in this test since they're tricky in tests
-        // Just check that the function runs and returns an empty list
-        let found_migrations = find_relevant_migrations(temp_dir.path());
-        assert!(found_migrations.len() == 0);
+        // Just check that the function runs and returns an error (no git repo)
+        let result = find_relevant_migrations(temp_dir.path());
+        assert!(result.is_err());
     }
 
 
@@ -938,7 +938,9 @@ class Migration(migrations.Migration):
         // Verify that migrations were found and would be processed
         // In dry-run mode, files aren't actually renamed, but we can verify the logic worked
         // by checking that find_relevant_migrations finds our migration files (both staged and untracked)
-        let found_migrations = find_relevant_migrations(temp_dir.path());
+        let result = find_relevant_migrations(temp_dir.path());
+        assert!(result.is_ok());
+        let found_migrations = result.unwrap();
         assert_eq!(found_migrations.len(), 4); // Now finds all 4 migration files (staged + untracked)
 
         // Verify the found migrations include both staged and untracked files

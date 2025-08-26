@@ -9,30 +9,20 @@ pub fn is_migration_file(s: &str) -> bool {
         .is_some_and(|pos| pos > 0 && s[..pos].chars().all(|c| c.is_ascii_digit()))
 }
 
-pub fn find_relevant_migrations(repo_path: &Path) -> Vec<PathBuf> {
+pub fn find_relevant_migrations(repo_path: &Path) -> Result<Vec<PathBuf>, String> {
     let mut migrations = Vec::new();
-    let repo = match Repository::open(repo_path) {
-        Ok(repo) => repo,
-        Err(e) => {
-            eprintln!("Failed to open git repository at {}: {}", repo_path.display(), e);
-            return migrations;
-        }
-    };
+    let repo = Repository::open(repo_path)
+        .map_err(|e| format!("Failed to open git repository at {}: {}", repo_path.display(), e))?;
 
     let mut status_opts = git2::StatusOptions::new();
     status_opts
         .include_ignored(false)
-        .include_untracked(true)  // Include untracked files
+        .include_untracked(true) // Include untracked files
         .include_unmodified(false)
-        .recurse_untracked_dirs(true);  // Recurse into untracked directories
+        .recurse_untracked_dirs(true); // Recurse into untracked directories
 
-    let statuses = match repo.statuses(Some(&mut status_opts)) {
-        Ok(statuses) => statuses,
-        Err(e) => {
-            eprintln!("Failed to get git status: {}", e);
-            return migrations;
-        }
-    };
+    let statuses = repo.statuses(Some(&mut status_opts))
+        .map_err(|e| format!("Failed to get git status: {}", e))?;
 
     for status_entry in statuses.iter() {
         let status = status_entry.status();
@@ -41,10 +31,10 @@ pub fn find_relevant_migrations(repo_path: &Path) -> Vec<PathBuf> {
         };
 
         // Include both staged AND untracked files (common during rebase)
-        let is_relevant = status.is_index_new() 
-            || status.is_index_modified() 
+        let is_relevant = status.is_index_new()
+            || status.is_index_modified()
             || status.is_index_renamed()
-            || status.is_wt_new();  // Untracked files in working tree
+            || status.is_wt_new(); // Untracked files in working tree
 
         #[allow(clippy::case_sensitive_file_extension_comparisons)]
         if is_relevant
@@ -61,7 +51,7 @@ pub fn find_relevant_migrations(repo_path: &Path) -> Vec<PathBuf> {
         }
     }
 
-    migrations
+    Ok(migrations)
 }
 
 pub fn stringify_migration_path(migration: &Path) -> Option<String> {
@@ -134,7 +124,7 @@ mod tests {
         assert!(is_migration_file("0002_auto_20230901_1234.py"));
         assert!(is_migration_file("9999_final_migration.py"));
         assert!(is_migration_file("1_short.py"));
-        
+
         // Invalid migration files
         assert!(!is_migration_file("__init__.py"));
         assert!(!is_migration_file("models.py"));
@@ -149,16 +139,25 @@ mod tests {
     #[test]
     fn test_stringify_migration_path() {
         let path = Path::new("/path/to/0001_initial.py");
-        assert_eq!(stringify_migration_path(path), Some("0001_initial.py".to_string()));
-        
+        assert_eq!(
+            stringify_migration_path(path),
+            Some("0001_initial.py".to_string())
+        );
+
         let path = Path::new("0002_models.py");
-        assert_eq!(stringify_migration_path(path), Some("0002_models.py".to_string()));
-        
+        assert_eq!(
+            stringify_migration_path(path),
+            Some("0002_models.py".to_string())
+        );
+
         // Directory path still has a filename component
         let path = Path::new("/path/to/directory/");
-        assert_eq!(stringify_migration_path(path), Some("directory".to_string()));
-        
-        // Empty path should return None 
+        assert_eq!(
+            stringify_migration_path(path),
+            Some("directory".to_string())
+        );
+
+        // Empty path should return None
         let path = Path::new("");
         assert_eq!(stringify_migration_path(path), None);
     }
@@ -167,20 +166,20 @@ mod tests {
     fn test_get_number_from_migration() {
         let path = Path::new("0001_initial.py");
         assert_eq!(get_number_from_migration(path), Some(1));
-        
+
         let path = Path::new("/full/path/0042_migration.py");
         assert_eq!(get_number_from_migration(path), Some(42));
-        
+
         let path = Path::new("9999_final.py");
         assert_eq!(get_number_from_migration(path), Some(9999));
-        
+
         // Invalid migration files
         let path = Path::new("__init__.py");
         assert_eq!(get_number_from_migration(path), None);
-        
+
         let path = Path::new("models.py");
         assert_eq!(get_number_from_migration(path), None);
-        
+
         let path = Path::new("invalid_0001.py");
         assert_eq!(get_number_from_migration(path), None);
     }
@@ -189,24 +188,30 @@ mod tests {
     fn test_get_name_from_migration() {
         let path = Path::new("0001_initial.py");
         assert_eq!(get_name_from_migration(path), Some("initial".to_string()));
-        
+
         let path = Path::new("/full/path/0042_auto_20230901_1234.py");
-        assert_eq!(get_name_from_migration(path), Some("auto_20230901_1234".to_string()));
-        
+        assert_eq!(
+            get_name_from_migration(path),
+            Some("auto_20230901_1234".to_string())
+        );
+
         let path = Path::new("9999_complex_migration_name.py");
-        assert_eq!(get_name_from_migration(path), Some("complex_migration_name".to_string()));
-        
+        assert_eq!(
+            get_name_from_migration(path),
+            Some("complex_migration_name".to_string())
+        );
+
         // Test without .py extension
         let path = Path::new("0001_initial");
         assert_eq!(get_name_from_migration(path), Some("initial".to_string()));
-        
+
         // Invalid migration files
         let path = Path::new("__init__.py");
         assert_eq!(get_name_from_migration(path), None);
-        
+
         let path = Path::new("models.py");
         assert_eq!(get_name_from_migration(path), None);
-        
+
         let path = Path::new("invalid_0001.py");
         assert_eq!(get_name_from_migration(path), None);
     }
@@ -216,15 +221,15 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let file_path = temp_dir.path().join("test_file.txt");
         let file_path_str = file_path.to_str().unwrap();
-        
+
         // Create test file
         let original_content = "Hello, world! This is a test file.";
         fs::write(&file_path, original_content).expect("Failed to write test file");
-        
+
         // Test replacing a range
         replace_range_in_file(file_path_str, 7, 12, "Rust", false)
             .expect("Failed to replace range");
-        
+
         let new_content = fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(new_content, "Hello, Rust! This is a test file.");
     }
@@ -234,15 +239,15 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let file_path = temp_dir.path().join("test_file.txt");
         let file_path_str = file_path.to_str().unwrap();
-        
+
         // Create test file
         let original_content = "Hello, world! This is a test file.";
         fs::write(&file_path, original_content).expect("Failed to write test file");
-        
+
         // Test dry run - should not modify file
         replace_range_in_file(file_path_str, 7, 12, "Rust", true)
             .expect("Failed to replace range in dry run");
-        
+
         let content = fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(content, original_content); // Should be unchanged
     }
@@ -258,64 +263,73 @@ mod tests {
     fn test_find_relevant_migrations_no_git_repo() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let result = find_relevant_migrations(temp_dir.path());
-        
-        // Should return empty vec when no git repo exists
-        assert!(result.is_empty());
+
+        // Should return error when no git repo exists
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to open git repository"));
     }
 
     #[test]
     fn test_find_relevant_migrations_empty_repo() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let _repo = Repository::init(temp_dir.path()).expect("Failed to create git repo");
-        
+
         let result = find_relevant_migrations(temp_dir.path());
-        
-        // Should return empty vec when no staged migrations exist
-        assert!(result.is_empty());
+
+        // Should return Ok with empty vec when no staged migrations exist
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 
     #[test]
     fn test_find_relevant_migrations_with_staged_files() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let repo = Repository::init(temp_dir.path()).expect("Failed to create git repo");
-        
+
         // Create migrations directory
         let migrations_dir = temp_dir.path().join("app").join("migrations");
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
-        
+
         // Create migration files
         let migration1 = migrations_dir.join("0001_initial.py");
         let migration2 = migrations_dir.join("0002_models.py");
         let non_migration = migrations_dir.join("__init__.py");
         let regular_file = migrations_dir.join("models.py");
-        
+
         fs::write(&migration1, "# Migration content").expect("Failed to write migration1");
         fs::write(&migration2, "# Migration content").expect("Failed to write migration2");
         fs::write(&non_migration, "# Init file").expect("Failed to write __init__.py");
         fs::write(&regular_file, "# Regular python file").expect("Failed to write models.py");
-        
+
         // Stage the files
         let mut index = repo.index().expect("Failed to get index");
-        index.add_path(Path::new("app/migrations/0001_initial.py"))
+        index
+            .add_path(Path::new("app/migrations/0001_initial.py"))
             .expect("Failed to stage migration1");
-        index.add_path(Path::new("app/migrations/0002_models.py"))
+        index
+            .add_path(Path::new("app/migrations/0002_models.py"))
             .expect("Failed to stage migration2");
-        index.add_path(Path::new("app/migrations/__init__.py"))
+        index
+            .add_path(Path::new("app/migrations/__init__.py"))
             .expect("Failed to stage __init__.py");
-        index.add_path(Path::new("app/migrations/models.py"))
+        index
+            .add_path(Path::new("app/migrations/models.py"))
             .expect("Failed to stage models.py");
         index.write().expect("Failed to write index");
-        
+
         let result = find_relevant_migrations(temp_dir.path());
-        
+
         // Should only find the migration files, not __init__.py or models.py
-        assert_eq!(result.len(), 2);
-        
-        let filenames: Vec<String> = result.iter()
+        assert!(result.is_ok());
+        let migrations = result.unwrap();
+        assert_eq!(migrations.len(), 2);
+
+        let filenames: Vec<String> = migrations
+            .iter()
             .filter_map(|path| path.file_name()?.to_str())
             .map(|s| s.to_string())
             .collect();
-        
+
         assert!(filenames.contains(&"0001_initial.py".to_string()));
         assert!(filenames.contains(&"0002_models.py".to_string()));
         assert!(!filenames.contains(&"__init__.py".to_string()));
@@ -326,75 +340,91 @@ mod tests {
     fn test_find_relevant_migrations_only_unstaged() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let _repo = Repository::init(temp_dir.path()).expect("Failed to create git repo");
-        
+
         // Create migrations directory
         let migrations_dir = temp_dir.path().join("app").join("migrations");
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
-        
+
         // Create migration file but don't stage it (it will be untracked)
         let migration1 = migrations_dir.join("0001_initial.py");
         fs::write(&migration1, "# Migration content").expect("Failed to write migration1");
-        
+
         // Don't stage the file - it should still be found as untracked
         let result = find_relevant_migrations(temp_dir.path());
-        
-        // Should find the untracked migration file 
-        assert_eq!(result.len(), 1);
-        assert!(result[0].file_name().unwrap().to_str().unwrap().contains("0001_initial.py"));
+
+        // Should find the untracked migration file
+        assert!(result.is_ok());
+        let migrations = result.unwrap();
+        assert_eq!(migrations.len(), 1);
+        assert!(
+            migrations[0]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("0001_initial.py")
+        );
     }
 
     #[test]
     fn test_find_relevant_migrations_outside_migrations_dir() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let repo = Repository::init(temp_dir.path()).expect("Failed to create git repo");
-        
+
         // Create a migration file outside migrations directory
         let migration_file = temp_dir.path().join("0001_initial.py");
         fs::write(&migration_file, "# Migration content").expect("Failed to write migration");
-        
+
         // Stage the file
         let mut index = repo.index().expect("Failed to get index");
-        index.add_path(Path::new("0001_initial.py"))
+        index
+            .add_path(Path::new("0001_initial.py"))
             .expect("Failed to stage migration");
         index.write().expect("Failed to write index");
-        
+
         let result = find_relevant_migrations(temp_dir.path());
-        
-        // Should return empty vec since file is not in migrations directory
-        assert!(result.is_empty());
+
+        // Should return Ok with empty vec since file is not in migrations directory
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 
     #[test]
     fn test_find_relevant_migrations_includes_untracked() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let repo = Repository::init(temp_dir.path()).expect("Failed to create git repo");
-        
+
         // Create migrations directory
         let migrations_dir = temp_dir.path().join("app").join("migrations");
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
-        
+
         // Create untracked migration files (common during rebase)
         let migration1 = migrations_dir.join("0013_new_feature.py");
         let migration2 = migrations_dir.join("0014_another_feature.py");
-        
-        fs::write(&migration1, "# New migration from feature branch").expect("Failed to write migration1");
-        fs::write(&migration2, "# Another migration from feature branch").expect("Failed to write migration2");
-        
+
+        fs::write(&migration1, "# New migration from feature branch")
+            .expect("Failed to write migration1");
+        fs::write(&migration2, "# Another migration from feature branch")
+            .expect("Failed to write migration2");
+
         // Refresh the git index to make sure git sees the files
         let mut index = repo.index().expect("Failed to get index");
         index.read(true).expect("Failed to read index");
-        
+
         // Don't stage the files - they should still be found as untracked
         let result = find_relevant_migrations(temp_dir.path());
-        
+
         // Should find the untracked migration files
-        assert_eq!(result.len(), 2, "Expected 2 untracked migration files");
-        
-        let filenames: Vec<String> = result.iter()
+        assert!(result.is_ok());
+        let migrations = result.unwrap();
+        assert_eq!(migrations.len(), 2, "Expected 2 untracked migration files");
+
+        let filenames: Vec<String> = migrations
+            .iter()
             .filter_map(|path| path.file_name()?.to_str())
             .map(|s| s.to_string())
             .collect();
-        
+
         assert!(filenames.contains(&"0013_new_feature.py".to_string()));
         assert!(filenames.contains(&"0014_another_feature.py".to_string()));
     }
