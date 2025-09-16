@@ -1,20 +1,219 @@
 use rustpython_parser::{Parse, ast};
+use std::fmt::Display;
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
 };
+use walkdir::WalkDir;
 
-use crate::utils::{
-    find_relevant_migrations, get_name_from_migration, get_number_from_migration,
-    is_migration_file, replace_range_in_file,
-};
+use crate::tables::{TableOptions, get_table};
+use crate::utils::{MergeConflict, replace_range_in_file};
 
-fn find_migration_string_location_in_file(
-    python_path: &PathBuf,
-    app_name: &str,
-) -> Result<(u32, u32), String> {
-    let parser = MigrationParser::new(python_path)?;
-    parser.find_dependency_location_for_app(app_name)
+// Common directories to skip during traversal for performance
+//
+// We do not need ".venv" or "node_modules" or similar since our django apps will
+// not be found there. But for edge cases where a user might name their django app
+// "node_modules" or similar for whatever reason, we provide the all-dirs flag for
+// a comprehensive scan.
+const SKIP_DIRECTORIES: &[&str] = &[
+    // Version control
+    ".git",
+    ".svn",
+    ".hg",
+    // Python environments
+    "venv",
+    "env",
+    ".venv",
+    ".env",
+    "virtualenv",
+    "__pycache__",
+    ".pytest_cache",
+    ".tox",
+    // Node.js
+    "node_modules",
+    ".npm",
+    ".yarn",
+    // Build/cache directories
+    "build",
+    "dist",
+    ".cache",
+    "target",
+    ".mypy_cache",
+    ".coverage",
+    "htmlcov",
+    // IDE/Editor directories
+    ".vscode",
+    ".idea",
+    ".sublime-project",
+    ".sublime-workspace",
+    // OS directories
+    ".DS_Store",
+    "Thumbs.db",
+    // Django specific
+    "static",
+    "staticdirs",
+    "staticfiles",
+    "static_collected",
+    "media",
+    // Docker
+    ".docker",
+    // Documentation build
+    "_build",
+    "docs/_build",
+    // Documentation
+    "docs",
+];
+
+#[derive(Debug)]
+pub struct DjangoProject {
+    pub apps: HashMap<String, MigrationGroup>,
+}
+
+impl DjangoProject {
+    fn from_path(repo_path: &Path, all_dirs: bool) -> Result<Self, String> {
+        let mut apps = HashMap::new();
+
+        let walkdir = WalkDir::new(repo_path);
+        let walkdir_iter: Box<dyn Iterator<Item = walkdir::Result<walkdir::DirEntry>>> = if all_dirs
+        {
+            // Scan all directories without skipping
+            Box::new(walkdir.into_iter())
+        } else {
+            // Apply directory filtering for performance.
+            Box::new(walkdir.into_iter().filter_entry(|e| {
+                if e.path().is_dir() {
+                    if let Some(dir_name) = e.path().file_name().and_then(|name| name.to_str()) {
+                        !SKIP_DIRECTORIES.contains(&dir_name)
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            }))
+        };
+
+        for entry in walkdir_iter.filter_map(|e| e.ok()) {
+            let path = entry.path();
+
+            if path.is_dir() && path.file_name() == Some(std::ffi::OsStr::new("migrations")) {
+                let app_path = path.parent().ok_or_else(|| {
+                    format!(
+                        "Invalid app directory for migrations folder: {}",
+                        path.display()
+                    )
+                })?;
+                let migration_group = MigrationGroup::create(app_path)?;
+                let app_name = migration_group.get_app_name();
+                apps.insert(app_name.to_string(), migration_group);
+            }
+        }
+
+        Ok(Self { apps })
+    }
+
+    /// Creates dependency changes for all migrations across all Django apps.
+    ///
+    /// This method coordinates the dependency update process by first building a lookup
+    /// table of all migration file name changes across all apps, then delegating to
+    /// each `MigrationGroup` to update its migrations' dependencies.
+    ///
+    /// When `same_app` is true, enables special handling for same-app dependencies
+    /// where rebased migrations that depend on the last common migration will be
+    /// updated to depend on the latest head migration instead.
+    ///
+    /// The process works in two phases:
+    /// 1. Builds a lookup table mapping app names to their migration file name changes
+    /// 2. Calls each `MigrationGroup` to update dependencies using the lookup table
+    ///
+    /// This ensures all apps have visibility into migration name changes from other
+    /// apps when updating cross-app dependencies.
+    fn create_migration_dependency_changes(&mut self, same_app: bool) {
+        let mut migration_file_changes_lookup: HashMap<String, Vec<MigrationFileNameChange>> =
+            HashMap::new();
+        for group in self.apps.values() {
+            let app_name = group.get_app_name().to_string();
+            let changes: Vec<MigrationFileNameChange> = group
+                .migrations
+                .values()
+                .filter_map(|m| m.name_change.clone())
+                .collect();
+            migration_file_changes_lookup.insert(app_name, changes);
+        }
+        for group in self.apps.values_mut() {
+            group.create_migration_dependency_changes(same_app, &migration_file_changes_lookup);
+        }
+    }
+
+    fn apply_changes(&mut self) -> Result<(), String> {
+        for group in self.apps.values() {
+            let migrations_dir = group.directory.clone();
+            for migration in group.migrations.values() {
+                if let Some(changes) = &migration.name_change {
+                    changes.apply_change(&migrations_dir)?
+                }
+                if let Some(changes) = &migration.dependency_change {
+                    let migration_path =
+                        if let Some(new_path) = migration.new_full_path(&migrations_dir) {
+                            new_path
+                        } else {
+                            migration.old_full_path(&migrations_dir)
+                        };
+                    changes.apply_change(&migration_path)?
+                }
+            }
+            if let Some(max_file) = &group.max_migration_file {
+                max_file.apply_change(&migrations_dir)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn changes_summary(&self) {
+        println!(
+            "{}",
+            get_table(TableOptions::Summary(&self.apps))
+                .display()
+                .unwrap()
+        );
+        for group in self.apps.values() {
+            let has_migration_changes = group
+                .migrations
+                .values()
+                .any(|m| m.name_change.is_some() || m.dependency_change.is_some());
+
+            if has_migration_changes {
+                println!();
+                println!(
+                    "{}",
+                    get_table(TableOptions::MigrationChanges(
+                        group.get_app_name(),
+                        &group.migrations
+                    ))
+                    .display()
+                    .unwrap()
+                );
+            }
+        }
+
+        let has_max_migration_changes = self.apps.values().any(|group| {
+            group
+                .max_migration_file
+                .as_ref()
+                .and_then(|f| f.new_content.as_ref())
+                .is_some()
+        });
+        if has_max_migration_changes {
+            println!();
+            println!(
+                "{}",
+                get_table(TableOptions::MaxMigrationChanges(&self.apps))
+                    .display()
+                    .unwrap()
+            );
+        }
+    }
 }
 
 struct MigrationParser {
@@ -41,22 +240,12 @@ impl MigrationParser {
         })
     }
 
-    fn find_dependency_location_for_app(&self, app_name: &str) -> Result<(u32, u32), String> {
+    fn find_dependency_location(&self) -> Result<(u32, u32), String> {
         let migration_class = self.find_migration_class()?;
         let dependencies_assignment = self.find_dependencies_assignment(migration_class)?;
-        let dependency_tuples = self.extract_dependency_tuples(dependencies_assignment)?;
-
-        for tuple in dependency_tuples {
-            if let Some(location) = self.try_extract_location_from_tuple(tuple, app_name)? {
-                return Ok(location);
-            }
-        }
-
-        Err(format!(
-            "No dependency found for app '{}' in file {}",
-            app_name,
-            self.file_path.display()
-        ))
+        let start = u32::from(dependencies_assignment.range.start());
+        let end = u32::from(dependencies_assignment.range.end());
+        Ok((start, end))
     }
 
     fn find_migration_class(&self) -> Result<&ast::StmtClassDef, String> {
@@ -110,411 +299,732 @@ impl MigrationParser {
         }
     }
 
-    fn try_extract_location_from_tuple(
-        &self,
-        tuple_expr: &ast::Expr,
-        target_app_name: &str,
-    ) -> Result<Option<(u32, u32)>, String> {
-        let tuple_items = match tuple_expr {
-            ast::Expr::Tuple(tuple) => &tuple.elts,
-            _ => return Ok(None), // Skip non-tuple elements
+    fn get_dependencies(&self) -> Vec<MigrationDependency> {
+        let empty_vec: Vec<MigrationDependency> = Vec::new();
+        let migration_class = match self.find_migration_class() {
+            Ok(class) => class,
+            Err(_) => return empty_vec,
+        };
+        let dependencies_assignment = match self.find_dependencies_assignment(migration_class) {
+            Ok(assignment) => assignment,
+            Err(_) => return empty_vec,
+        };
+        let dependency_tuples = match self.extract_dependency_tuples(dependencies_assignment) {
+            Ok(tuples) => tuples,
+            Err(_) => return empty_vec,
         };
 
-        let app_name = self.extract_app_name_from_tuple(tuple_items)?;
-        if app_name != target_app_name {
-            return Ok(None);
-        }
+        let mut result = Vec::new();
 
-        let migration_name_expr = tuple_items.get(1).ok_or_else(|| {
-            format!(
-                "Missing migration name in dependencies tuple in {}",
-                self.file_path.display()
-            )
-        })?;
-
-        match migration_name_expr {
-            ast::Expr::Constant(constant) => {
-                let range = constant.range;
-                Ok(Some((u32::from(range.start()), u32::from(range.end()))))
+        for expr in dependency_tuples {
+            if let Ok(dependency) = MigrationDependency::try_from(expr) {
+                result.push(dependency);
             }
-            _ => Err(format!(
-                "Migration name should be a string constant in {}",
-                self.file_path.display()
-            )),
+        }
+        result
+    }
+}
+
+/// Always starts with 4 digits, then an underscore, then the name
+/// e.g. 0001_initial.py
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationFileName(pub String);
+
+impl TryFrom<&ast::Expr> for MigrationFileName {
+    type Error = String;
+
+    fn try_from(expr: &ast::Expr) -> Result<Self, Self::Error> {
+        match expr {
+            ast::Expr::Tuple(tuple) => {
+                if tuple.elts.len() != 2 {
+                    return Err("Tuple must have exactly 2 elements".to_string());
+                }
+
+                // Extract migration name (second element)
+                match &tuple.elts[1] {
+                    ast::Expr::Constant(constant) => match constant.value.as_str() {
+                        Some(s) => MigrationFileName::try_from(s.to_string()),
+                        None => Err("Second tuple element is not a string constant".to_string()),
+                    },
+                    _ => Err("Second tuple element is not a constant".to_string()),
+                }
+            }
+            _ => Err("Expression is not a tuple".to_string()),
+        }
+    }
+}
+
+impl TryFrom<String> for MigrationFileName {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        let underscore_pos = name.find('_');
+        if !underscore_pos.is_some_and(|pos| {
+            pos == 4 && // Exactly 4 digits
+            name[..pos].chars().all(|c| c.is_ascii_digit()) &&
+            pos < name.len() - 1 // Must have content after underscore
+        }) {
+            return Err(format!("Invalid migration file name: {}", name));
+        }
+        Ok(Self(name.strip_suffix(".py").unwrap_or(&name).to_string()))
+    }
+}
+
+impl MigrationFileName {
+    fn from_number_and_name(number: u32, name: &str) -> Self {
+        Self::try_from(format!("{:04}_{}", number, name)).unwrap()
+    }
+
+    fn name(&self) -> String {
+        self.0.splitn(2, '_').nth(1).unwrap().to_string()
+    }
+
+    fn number(&self) -> u32 {
+        self.0
+            .splitn(2, '_')
+            .next()
+            .expect("we validate on create, this cannot fail")
+            .parse()
+            .expect("we validate on create, this cannot fail")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationDependency {
+    app: String,
+    migration_file: MigrationFileName,
+}
+
+impl Display for MigrationDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "('{}', '{}')", self.app, self.migration_file.0)
+    }
+}
+
+impl TryFrom<&ast::Expr> for MigrationDependency {
+    type Error = String;
+
+    fn try_from(expr: &ast::Expr) -> Result<Self, Self::Error> {
+        match expr {
+            ast::Expr::Tuple(tuple) => {
+                if tuple.elts.len() != 2 {
+                    return Err("Tuple must have exactly 2 elements".to_string());
+                }
+
+                // Extract app name (first element)
+                let app = match &tuple.elts[0] {
+                    ast::Expr::Constant(constant) => match constant.value.as_str() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            return Err("First tuple element is not a string constant".to_string());
+                        }
+                    },
+                    _ => return Err("First tuple element is not a constant".to_string()),
+                };
+
+                // Use MigrationFileName::try_from for the migration filename
+                let migration_file = MigrationFileName::try_from(expr)?;
+
+                Ok(MigrationDependency {
+                    app,
+                    migration_file,
+                })
+            }
+            _ => Err("Expression is not a tuple".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationFileNameChange {
+    pub old_name: MigrationFileName,
+    pub new_name: MigrationFileName,
+}
+
+impl MigrationFileNameChange {
+    fn new(old_name: MigrationFileName, new_name: MigrationFileName) -> Self {
+        Self { old_name, new_name }
+    }
+
+    fn apply_change(&self, migrations_dir: &PathBuf) -> Result<(), String> {
+        let old_path = migrations_dir.join(&self.old_name.0).with_extension("py");
+        let new_path = migrations_dir.join(&self.new_name.0).with_extension("py");
+        std::fs::rename(old_path, new_path).map_err(|e| format!("Failed to rename file: {}", e))?;
+        Ok(())
+    }
+}
+
+impl Display for MigrationFileNameChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} -> {}", self.old_name.0, self.new_name.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationDependencyChange {
+    pub old_dependencies: Vec<MigrationDependency>,
+    pub new_dependencies: Vec<MigrationDependency>,
+}
+
+impl MigrationDependencyChange {
+    fn new(
+        old_dependencies: Vec<MigrationDependency>,
+        new_dependencies: Vec<MigrationDependency>,
+    ) -> Self {
+        Self {
+            old_dependencies,
+            new_dependencies,
         }
     }
 
-    fn extract_app_name_from_tuple<'a>(
-        &self,
-        tuple_elements: &'a [ast::Expr],
-    ) -> Result<&'a str, String> {
-        match tuple_elements.first() {
-            Some(ast::Expr::Constant(django_app)) => django_app
-                .value
-                .as_str()
-                .map(|s| s.as_str())
-                .ok_or_else(|| {
-                    format!(
-                        "Expected a string as django app name in {}",
-                        self.file_path.display()
-                    )
-                }),
-            Some(_) => Err(format!(
-                "Expected a django app name as first item of the tuple in {}",
-                self.file_path.display()
-            )),
-            None => Err(format!(
-                "Missing first element in dependencies tuple in {}",
-                self.file_path.display()
-            )),
+    fn apply_change(&self, migration_path: &PathBuf) -> Result<(), String> {
+        let parser = MigrationParser::new(migration_path)?;
+        let (start, end) = parser.find_dependency_location()?;
+        let replacement = self.generate_replacement_string();
+        replace_range_in_file(
+            migration_path
+                .to_str()
+                .expect("Migration file path must be valid UTF-8"),
+            start as usize,
+            end as usize,
+            &replacement,
+        )?;
+        Ok(())
+    }
+
+    fn generate_replacement_string(&self) -> String {
+        let mut parts = Vec::new();
+        for dep in &self.new_dependencies {
+            parts.push(format!("('{}', '{}')", dep.app, dep.migration_file.0));
         }
+        format!("dependencies = [{}]", parts.join(", "))
+    }
+}
+
+impl Display for MigrationDependencyChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let old_deps: Vec<String> = self
+            .old_dependencies
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
+        let new_deps: Vec<String> = self
+            .new_dependencies
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
+        write!(f, "[{}] -> [{}]", old_deps.join(", "), new_deps.join(", "))
     }
 }
 
 #[derive(Debug, Clone)]
-struct Migration {
-    number: u32,
-    name: String,
-    new_number: Option<u32>,
-    previous_migration_name: Option<String>,
+pub struct Migration {
+    pub number: u32,
+    pub name: String,
+    pub file_name: MigrationFileName,
+    pub dependencies: Vec<MigrationDependency>,
+    pub from_rebased_branch: bool,
+    pub name_change: Option<MigrationFileNameChange>,
+    pub dependency_change: Option<MigrationDependencyChange>,
 }
 
 impl Migration {
-    fn old_full_path(&self, migration_dir: &Path) -> PathBuf {
-        migration_dir
+    fn new(number: u32, name: String, dependencies: Vec<MigrationDependency>) -> Self {
+        let file_name = MigrationFileName::try_from(format!("{:04}_{}", number, name))
+            .expect("We must be able to create a valid migration file name here");
+        Self {
+            number,
+            name,
+            file_name,
+            dependencies,
+            from_rebased_branch: false,
+            name_change: None,
+            dependency_change: None,
+        }
+    }
+
+    fn old_full_path(&self, directory: &Path) -> PathBuf {
+        directory
             .join(format!("{:04}_{}", self.number, self.name))
             .with_extension("py")
     }
-    fn new_full_path(&self, migration_dir: &Path) -> Option<PathBuf> {
-        let number = self.new_number?;
-        let new_name = format!("{:04}_{}", number, self.name);
-        let new_path = migration_dir.join(new_name);
+    fn new_full_path(&self, directory: &Path) -> Option<PathBuf> {
+        let name_change = self.name_change.clone()?;
+        let new_path = directory.join(name_change.new_name.0);
         Some(new_path.with_extension("py"))
     }
 }
 
 #[derive(Debug)]
-struct MigrationGroup {
-    migrations: HashMap<u32, Migration>,
-    migration_dir: PathBuf,
-    migration_name_changes: Option<HashMap<String, String>>,
+pub struct MigrationGroup {
+    pub migrations: HashMap<PathBuf, Migration>,
+    pub directory: PathBuf,
+    pub last_common_migration: Option<MigrationFileName>,
+    pub max_migration_file: Option<MaxMigrationFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaxMigrationFile {
+    pub current_content: MigrationFileName,
+    pub new_content: Option<MigrationFileName>,
+}
+
+impl MaxMigrationFile {
+    /// Applies the max migration file change to disk.
+    ///
+    /// Writes the new content to the `max_migration.txt` file in the specified
+    /// migrations directory. Only performs the write operation if `new_content`
+    /// is present, otherwise does nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file write operation fails.
+    fn apply_change(&self, migrations_dir: &PathBuf) -> Result<(), String> {
+        if let Some(new_content) = &self.new_content {
+            let max_migration_path = migrations_dir.join("max_migration").with_extension("txt");
+            let content = format!("{}\n", new_content.0);
+            std::fs::write(&max_migration_path, content)
+                .map_err(|e| format!("Failed to write max migration file: {e}"))?;
+        }
+        Ok(())
+    }
 }
 
 impl MigrationGroup {
-    fn find_highest_migration_number(&self) -> Option<u32> {
-        self.migrations.keys().max().copied()
-    }
+    /// Updates migration dependencies within this group based on file name changes.
+    ///
+    /// This method handles two distinct scenarios for updating migration dependencies:
+    ///
+    /// **Same-app processing** (`same_app = true`): Updates dependencies for rebased
+    /// migrations within the current app. Special handling includes:
+    /// - Dependencies on the last common migration are updated to point to the latest head migration
+    /// - Other dependencies are updated based on the lookup table of file name changes
+    ///
+    /// **Cross-app processing** (`same_app = false`): Updates dependencies that reference
+    /// migrations in other apps, using the lookup table to find renamed migration files.
+    ///
+    /// The method preserves existing dependency changes and only creates new
+    /// `MigrationDependencyChange` objects when actual updates are needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a head migration is expected but not found when updating dependencies
+    /// on the last common migration.
+    fn create_migration_dependency_changes(
+        &mut self,
+        same_app: bool,
+        lookup: &HashMap<String, Vec<MigrationFileNameChange>>,
+    ) {
+        // if same_app is true, check all rebased migrations dependencies if there are affected.
+        // - if the migration has the dependency of self.last_common_migration it needs to be set to the last head migration
+        // - for all other rebased migrations, set their dependencies based on the lookup
+        let app_name = self.get_app_name().to_string();
+        let head_migration = self.find_highest_migration(true).cloned();
 
-    /// This function should find the last head migration in the group
-    /// Our new migrations lowest number could be smaller than the last head migration.
-    /// It could be the same.
-    /// But it can never be larger.
-    fn find_last_head_migration(&self) -> Option<PathBuf> {
-        let files = self.sorted_files_in_dir();
-        let migration_paths = self.migration_paths();
-        let mut highest_number = 0;
-        let mut last_head_migration = None;
-        for file in files {
-            if let Some(file_name) = file.file_name() {
-                let file_path = file.clone();
-                if migration_paths.contains(&file_path) {
-                    // We could have migrations with much higher numbers
-                    // that are coming from our branch. But we are only
-                    // interested in the last migration of the branch
-                    // that we rebase against.
-                    continue;
-                }
-                let file_name_str = file_name.to_string_lossy();
-                if is_migration_file(&file_name_str) {
-                    let number = get_number_from_migration(&file)?;
-                    if number >= highest_number {
-                        highest_number = number;
-                        last_head_migration = Some(file_path);
+        for migration in self.migrations.values_mut() {
+            // same app and rebased migration
+            if same_app == true && migration.from_rebased_branch {
+                let mut updated_dependencies = migration.dependencies.clone();
+                let mut has_changes = false;
+
+                for (i, dependency) in migration.dependencies.iter().enumerate() {
+                    if dependency.app == app_name {
+                        // 1. Case: the migration depends on the last common migration
+                        if let Some(common_migration) = &self.last_common_migration {
+                            if dependency.migration_file == *common_migration {
+                                updated_dependencies[i] = MigrationDependency {
+                                    app: app_name.clone(),
+                                    migration_file: head_migration
+                                        .as_ref()
+                                        .expect("We must have a head migration here")
+                                        .file_name
+                                        .clone(),
+                                };
+                                has_changes = true;
+                                continue;
+                            }
+                        }
+
+                        // 2. Case: check if there is any change in the lookup in the same app
+                        if let Some(changes) = lookup.get(&dependency.app) {
+                            for change in changes {
+                                if dependency.migration_file == change.old_name {
+                                    updated_dependencies[i] = MigrationDependency {
+                                        app: app_name.clone(),
+                                        migration_file: change.new_name.clone(),
+                                    };
+                                    has_changes = true;
+                                    break;
+                                }
+                            }
+                        }
                     }
+                }
+
+                if has_changes {
+                    migration.dependency_change = Some(MigrationDependencyChange::new(
+                        migration.dependencies.clone(),
+                        updated_dependencies,
+                    ));
+                }
+            } else {
+                // not the same app
+                let mut updated_dependencies = migration
+                    .dependency_change
+                    .as_ref()
+                    .map(|dc| dc.new_dependencies.clone())
+                    .unwrap_or_else(|| migration.dependencies.clone());
+                let mut has_changes = migration.dependency_change.is_some();
+
+                for dependency in updated_dependencies.iter_mut() {
+                    if dependency.app != app_name {
+                        if let Some(changes) = lookup.get(&dependency.app) {
+                            for change in changes {
+                                if dependency.migration_file == change.old_name {
+                                    dependency.migration_file = change.new_name.clone();
+                                    has_changes = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if has_changes {
+                    migration.dependency_change = Some(MigrationDependencyChange::new(
+                        migration.dependencies.clone(),
+                        updated_dependencies,
+                    ));
                 }
             }
         }
-        last_head_migration
     }
 
-    /// Finds all current files in the migration directory.
-    fn sorted_files_in_dir(&self) -> Vec<PathBuf> {
-        let dir = self.migration_dir.clone();
-        let mut files = Vec::new();
-        if let Ok(entries) = dir.read_dir() {
-            for entry in entries.flatten() {
-                if let Some(file_name) = entry.file_name().to_str() {
-                    if std::path::Path::new(file_name)
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
-                        && file_name != "__init__.py"
-                    {
-                        files.push(entry.path());
+    fn create_migration_name_changes(&mut self) {
+        // Find the highest migration number from head (non-rebased) migrations
+        let highest_head_number = self
+            .migrations
+            .values()
+            .filter(|m| !m.from_rebased_branch)
+            .map(|m| m.number)
+            .max()
+            .unwrap_or(0);
+
+        // Get all rebased migrations sorted by their current number
+        let mut rebased_migrations: Vec<&mut Migration> = self
+            .migrations
+            .values_mut()
+            .filter(|m| m.from_rebased_branch)
+            .collect();
+        rebased_migrations.sort_by_key(|m| m.number);
+
+        // Renumber rebased migrations starting from highest_head_number + 1
+        let mut new_migration_number = highest_head_number + 1;
+        let mut highest_new_migration = None;
+        for migration in rebased_migrations {
+            let new_migration_name = MigrationFileName::from_number_and_name(
+                new_migration_number,
+                &migration.file_name.name(),
+            );
+            migration.name_change = Some(MigrationFileNameChange::new(
+                migration.file_name.clone(),
+                new_migration_name.clone(),
+            ));
+            highest_new_migration = Some(new_migration_name);
+            new_migration_number += 1;
+        }
+
+        // Update max_migration_file if we have rebased migrations and a max_migration.txt file
+        if let (Some(highest_new), Some(max_file)) =
+            (highest_new_migration, &mut self.max_migration_file)
+        {
+            max_file.new_content = Some(highest_new);
+        }
+    }
+
+    fn set_last_common_migration(
+        &mut self,
+        max_head_migration: MigrationFileName,
+        max_rebased_migration: MigrationFileName,
+    ) {
+        let head_number = max_head_migration.number();
+        let rebased_number = max_rebased_migration.number();
+
+        // Find the migrations in our group by their names
+        let mut head_current = Some(max_head_migration.clone());
+        let mut rebased_current = Some(max_rebased_migration.clone());
+
+        // Collect all rebased branch migrations to tag them later
+        let mut rebased_migrations = Vec::new();
+        let mut current = Some(max_rebased_migration.clone());
+        while let Some(migration) = current {
+            rebased_migrations.push(migration.clone());
+            current = self.get_previous_migration_in_app(&migration);
+        }
+
+        // If one migration number is higher than the other, trace back the higher one
+        // until we reach the same number level
+        if head_number > rebased_number {
+            head_current = self.trace_back_to_number(&max_head_migration, rebased_number);
+        } else if rebased_number > head_number {
+            rebased_current = self.trace_back_to_number(&max_rebased_migration, head_number);
+        }
+
+        // Now both should be at the same number level, trace back together to find common ancestor
+        while let (Some(head), Some(rebased)) = (&head_current, &rebased_current) {
+            if head == rebased {
+                self.last_common_migration = Some(head.clone());
+
+                // Tag all rebased migrations that come after the common ancestor
+                for migration_name in &rebased_migrations {
+                    if migration_name.number() > head.number() {
+                        self.tag_migration_as_rebased(migration_name);
                     }
                 }
+                return;
+            }
+
+            // Move both back one step by following their dependencies
+            head_current = self.get_previous_migration_in_app(head);
+            rebased_current = self.get_previous_migration_in_app(rebased);
+        }
+
+        // If we couldn't find a common migration, set to None and don't tag anything
+        self.last_common_migration = None;
+    }
+
+    /// Trace back from a migration to find the migration with the target number
+    fn trace_back_to_number(
+        &self,
+        migration: &MigrationFileName,
+        target_number: u32,
+    ) -> Option<MigrationFileName> {
+        let mut current = Some(migration.clone());
+
+        while let Some(current_migration) = current.clone() {
+            if current_migration.number() == target_number {
+                return Some(current_migration);
+            }
+
+            if current_migration.number() < target_number {
+                return None; // We went too far back
+            }
+
+            current = self.get_previous_migration_in_app(&current_migration);
+        }
+
+        None
+    }
+
+    /// Find the previous migration in the same app by looking at dependencies
+    fn get_previous_migration_in_app(
+        &self,
+        migration: &MigrationFileName,
+    ) -> Option<MigrationFileName> {
+        let app_name = self.get_app_name();
+        let migration_obj = self
+            .migrations
+            .values()
+            .find(|m| &m.file_name == migration)?;
+
+        for dep in &migration_obj.dependencies {
+            if dep.app == app_name {
+                return Some(dep.migration_file.clone());
             }
         }
-        files.sort();
-        files
+        None
+    }
+
+    /// Tag a migration as coming from the rebased branch
+    fn tag_migration_as_rebased(&mut self, migration_name: &MigrationFileName) {
+        for migration in self.migrations.values_mut() {
+            if &migration.file_name == migration_name {
+                migration.from_rebased_branch = true;
+                break;
+            }
+        }
+    }
+
+    /// Return the Head migration and the Rebased migration that are conflicting.
+    fn find_max_migration_conflict(&self) -> Option<(MigrationFileName, MigrationFileName)> {
+        let max_migration_path = self.directory.join("max_migration.txt");
+        if !max_migration_path.exists() {
+            return None;
+        }
+        let content = std::fs::read_to_string(&max_migration_path).ok()?;
+        let conflict = MergeConflict::try_from(content).ok()?;
+        let head_migration = MigrationFileName::try_from(conflict.head.trim().to_string()).ok();
+        let rebased_migration =
+            MigrationFileName::try_from(conflict.incoming_change.trim().to_string()).ok();
+
+        match (head_migration, rebased_migration) {
+            (Some(head), Some(rebased)) => Some((head, rebased)),
+            _ => None,
+        }
+    }
+
+    /// Finds the highest migration number among migrations in this group.
+    ///
+    /// When `head_only` is true, only considers migrations from the HEAD branch
+    /// (excludes rebased migrations). When false, considers all migrations regardless
+    /// of their branch origin.
+    ///
+    /// Returns `None` if no migrations are found that match the filtering criteria.
+    fn find_highest_migration_number(&self, head_only: bool) -> Option<u32> {
+        if head_only {
+            return self
+                .migrations
+                .values()
+                .filter(|m| !m.from_rebased_branch)
+                .map(|m| m.number)
+                .max();
+        }
+        return self.migrations.values().map(|m| m.number).max();
+    }
+
+    /// Finds the single migration with the highest number in this group.
+    ///
+    /// When `head_only` is true, only considers migrations from the HEAD branch
+    /// (excludes rebased migrations). When false, considers all migrations regardless
+    /// of their branch origin.
+    ///
+    /// # Returns
+    ///
+    /// Returns the migration with the highest number, ensuring there is exactly one
+    /// migration with that number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No migrations are found that match the filtering criteria
+    /// - Multiple migrations exist with the same highest number (indicates corruption)
+    fn find_highest_migration(&self, head_only: bool) -> Result<&Migration, String> {
+        // return an Error if there is more than one migration with the highest number.
+        // Otherwise there should only be one migration. Return it.
+        let highest_number = self
+            .find_highest_migration_number(head_only)
+            .ok_or_else(|| "No migrations found".to_string())?;
+        let migrations_with_highest_number: Vec<&Migration> = self
+            .migrations
+            .values()
+            .filter(|m| m.number == highest_number)
+            .collect();
+        if migrations_with_highest_number.len() > 1 {
+            Err(format!(
+                "Multiple migrations found with the highest number: {}",
+                highest_number
+            ))
+        } else {
+            Ok(migrations_with_highest_number.into_iter().next().unwrap())
+        }
     }
 
     /// Returns the Django app name from the migration directory.
     /// The app name is the folder name on level above the migration directory.
-    fn get_app_name(&self) -> &str {
-        let levels: Vec<_> = self.migration_dir.components().collect();
+    pub fn get_app_name(&self) -> &str {
+        let levels: Vec<_> = self.directory.components().collect();
         levels[levels.len() - 2]
             .as_os_str()
             .to_str()
             .expect("We must be able to convert the app name to a string")
     }
-
-    fn migration_paths(&self) -> Vec<PathBuf> {
-        self.migrations
-            .values()
-            .map(|migration| migration.old_full_path(&self.migration_dir))
-            .collect()
-    }
-
-    fn add_previous_migration_name(&mut self, last_head_migration: &Path) -> Result<(), String> {
-        let lowest_number = self
-            .migrations
-            .values()
-            .map(|migration| migration.number)
-            .min()
-            .ok_or_else(|| "No migrations found".to_string())?;
-        let migrations_lookup = self.migrations.clone();
-
-        for (number, migration) in &mut self.migrations {
-            if number == &lowest_number {
-                let previous_migration_name = get_name_from_migration(last_head_migration)
-                    .ok_or_else(|| {
-                        format!(
-                            "Failed to get migration name from path: {}",
-                            last_head_migration.display()
-                        )
-                    })?;
-                migration.previous_migration_name = Some(previous_migration_name);
-            } else {
-                migration.previous_migration_name = Some(
-                    migrations_lookup
-                        .get(&(migration.number - 1))
-                        .ok_or_else(|| {
-                            format!("Failed to find previous migration for {}", migration.name)
-                        })?
-                        .name
-                        .clone(),
-                );
-            }
-        }
-        Ok(())
-    }
-
-    fn generate_new_migration_numbers(&mut self, last_head_migration: &Path) -> Result<(), String> {
-        let last_head_migration_number = get_number_from_migration(last_head_migration)
-            .ok_or_else(|| {
-                format!(
-                    "Failed to get migration number from path: {}",
-                    last_head_migration.display()
-                )
-            })?;
-        let mut new_migration_names = HashMap::new();
-        // Get migrations sorted by their number
-        let mut sorted_migrations: Vec<&mut Migration> = self.migrations.values_mut().collect();
-        sorted_migrations.sort_by_key(|m| m.number);
-
-        let mut new_migration_number = last_head_migration_number + 1;
-        for migration in sorted_migrations {
-            migration.new_number = Some(new_migration_number);
-
-            let new_migration_name = format!("{:04}_{}", new_migration_number, migration.name);
-            new_migration_names.insert(migration.name.clone(), new_migration_name);
-            new_migration_number += 1;
-        }
-        self.migration_name_changes = Some(new_migration_names);
-        Ok(())
-    }
-
-    fn rename_files(&self, dry_run: bool) -> Result<(), String> {
-        for migration in self.migrations.values() {
-            let new_path = migration
-                .new_full_path(&self.migration_dir)
-                .ok_or_else(|| {
-                    format!(
-                        "Failed to generate new path for migration {}",
-                        migration.name
-                    )
-                })?;
-            if dry_run {
-                println!(
-                    "Would rename {} to {}",
-                    migration.old_full_path(&self.migration_dir).display(),
-                    new_path.display()
-                );
-            } else if let Err(e) =
-                std::fs::rename(migration.old_full_path(&self.migration_dir), &new_path)
-            {
-                return Err(format!(
-                    "Failed to rename migration {}: {}",
-                    migration.name, e
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Uses Python AST to parse the migration files and find the dependencies array.
-    /// Then it updates the entry in the dependencies array with the new migration file name.
-    fn update_migration_file_dependencies(&self, dry_run: bool) -> Result<(), String> {
-        if dry_run {
-            return Ok(());
-        }
-        let app_name = self.get_app_name();
-        for migration in self.migrations.values() {
-            let python_path = migration
-                .new_full_path(&self.migration_dir)
-                .ok_or_else(|| {
-                    format!(
-                        "Failed to get new full path for migration {}",
-                        migration.name
-                    )
-                })?;
-            let (start, end) = find_migration_string_location_in_file(&python_path, app_name)?;
-            let replacement = {
-                let number = migration
-                    .new_number
-                    .expect("New Migration numbers must be set at this point.")
-                    - 1;
-                let name = migration
-                    .previous_migration_name
-                    .as_ref()
-                    .expect("Previous migration name must be set at this point.");
-                format!("'{number:04}_{name}'")
-            };
-            replace_range_in_file(
-                python_path
-                    .to_str()
-                    .expect("Migration file path must be valid UTF-8"),
-                start as usize,
-                end as usize,
-                &replacement,
-                dry_run,
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Write the migration with the highest number in the file
-    fn update_max_migration_file(&self, dry_run: bool) -> Result<(), String> {
-        if dry_run {
-            return Ok(());
-        }
-        let max_migration_number = self.find_highest_migration_number().unwrap_or(0);
-        let max_migration = self.migrations.get(&max_migration_number).ok_or_else(|| {
-            format!("No migration found for the highest number: {max_migration_number}")
-        })?;
-        let max_migration_path = self
-            .migration_dir
-            .join("max_migration")
-            .with_extension("txt");
-        if !max_migration_path.exists() {
-            return Ok(());
-        }
-        let content = format!(
-            "{:04}_{}\n",
-            max_migration
-                .new_number
-                .expect("New migration number must be set."),
-            max_migration.name
-        );
-        std::fs::write(max_migration_path, content)
-            .map_err(|e| format!("Failed to write max migration file: {e}"))?;
-        Ok(())
-    }
 }
 
 impl MigrationGroup {
-    fn create(migrations: Vec<PathBuf>) -> Result<Vec<Self>, String> {
-        let mut grouped_migrations: Vec<Self> = Vec::new();
+    fn create(app_path: &Path) -> Result<Self, String> {
+        let directory = app_path.join("migrations");
 
-        for migration_path in migrations {
-            let parent_dir = match migration_path.parent() {
-                Some(dir) => dir.to_path_buf(),
-                None => {
-                    return Err(format!(
-                        "Failed to get parent directory for migration path: {}",
-                        migration_path.display()
-                    ));
-                }
-            };
-            let migration_number = get_number_from_migration(&migration_path).ok_or_else(|| {
-                format!(
-                    "Failed to get migration number from path: {}",
-                    migration_path.display()
-                )
-            })?;
-            let migration_name = get_name_from_migration(&migration_path).ok_or_else(|| {
-                format!(
-                    "Failed to get migration name from path: {}",
-                    migration_path.display()
-                )
-            })?;
+        let mut migrations = HashMap::new();
+        let current_dir = fs::read_dir(&directory).map_err(|e| {
+            format!(
+                "Failed to read migrations directory {}: {}",
+                directory.display(),
+                e
+            )
+        })?;
+        for entry in current_dir {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+            let path = entry.path();
 
-            let mut found_group = false;
-            for group in &mut grouped_migrations {
-                if group.migration_dir == parent_dir {
-                    group.migrations.insert(
-                        migration_number,
-                        Migration {
-                            number: migration_number,
-                            name: migration_name.clone(),
-                            new_number: None,
-                            previous_migration_name: None,
-                        },
+            if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+                if let Ok(migration_file_name) = MigrationFileName::try_from(file_name.to_string())
+                {
+                    let parser = MigrationParser::new(&path)?;
+                    let dependencies = parser.get_dependencies();
+                    migrations.insert(
+                        path,
+                        Migration::new(
+                            migration_file_name.number(),
+                            migration_file_name.name(),
+                            dependencies,
+                        ),
                     );
-                    found_group = true;
-                    break;
                 }
-            }
-
-            if !found_group {
-                let mut migrations_map = HashMap::new();
-                migrations_map.insert(
-                    migration_number,
-                    Migration {
-                        number: migration_number,
-                        name: migration_name,
-                        new_number: None,
-                        previous_migration_name: None,
-                    },
-                );
-                grouped_migrations.push(Self {
-                    migrations: migrations_map,
-                    migration_dir: parent_dir,
-                    migration_name_changes: None,
-                });
             }
         }
-        Ok(grouped_migrations)
+        let max_migration_file = Self::load_max_migration_file(&directory);
+
+        Ok(Self {
+            migrations,
+            directory,
+            last_common_migration: None,
+            max_migration_file,
+        })
+    }
+
+    fn load_max_migration_file(directory: &Path) -> Option<MaxMigrationFile> {
+        let max_migration_path = directory.join("max_migration.txt");
+
+        if !max_migration_path.exists() {
+            return None;
+        }
+
+        let content = fs::read_to_string(&max_migration_path).ok()?;
+        let content = content.trim();
+
+        if content.is_empty() {
+            return None;
+        }
+
+        Self::parse_max_migration_content(content).map(|migration_file| MaxMigrationFile {
+            current_content: migration_file,
+            new_content: None,
+        })
+    }
+
+    fn parse_max_migration_content(content: &str) -> Option<MigrationFileName> {
+        if let Ok(merge_conflict) = MergeConflict::try_from(content.to_string()) {
+            MigrationFileName::try_from(merge_conflict.head).ok()
+        } else {
+            MigrationFileName::try_from(content.to_string()).ok()
+        }
     }
 }
 
-pub fn fix(search_path: &str, dry_run: bool) -> Result<(), String> {
+pub fn fix(search_path: &str, dry_run: bool, all_dirs: bool) -> Result<(), String> {
     if dry_run {
         println!("Dry run detected. No changes will be made.");
     }
-    let migrations = find_relevant_migrations(Path::new(search_path));
-    let mut migration_groups = MigrationGroup::create(migrations)?;
-    if migration_groups.is_empty() {
-        return Err("No staged migrations found.".to_string());
+    let search_path = Path::new(search_path);
+    let mut django_project = DjangoProject::from_path(search_path, all_dirs)?;
+    if django_project.apps.is_empty() {
+        return Err("No Django apps with migrations found.".to_string());
     }
-    for group in &mut migration_groups {
-        if let Some(last_head_migration) = group.find_last_head_migration() {
-            group.generate_new_migration_numbers(&last_head_migration)?;
-            group.add_previous_migration_name(&last_head_migration)?;
-            group.rename_files(dry_run)?;
-            group.update_migration_file_dependencies(dry_run)?;
-            group.update_max_migration_file(dry_run)?;
+    for group in django_project.apps.values_mut() {
+        let conflicting_file_names = group.find_max_migration_conflict();
+        if let Some((head, rebased)) = conflicting_file_names {
+            group.set_last_common_migration(head, rebased);
+            group.create_migration_name_changes();
         }
+    }
+    // first create all name changes within the same app, then create all dependency changes for other apps.
+    django_project.create_migration_dependency_changes(true);
+    django_project.create_migration_dependency_changes(false);
+
+    if dry_run == true {
+        django_project.changes_summary();
+    } else {
+        django_project.apply_changes()?;
     }
     Ok(())
 }
@@ -524,7 +1034,6 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::{TempDir, tempdir};
-    use git2::Repository;
 
     /// Helper function to create a test environment with temp directories
     fn setup_test_env() -> (TempDir, PathBuf) {
@@ -535,423 +1044,1067 @@ mod tests {
         (temp_dir, migrations_dir)
     }
 
-    fn create_test_migration_file(dir: &Path, number: u32, name: &str, deps: &str) -> PathBuf {
+    fn create_test_migration_file(
+        dir: &Path,
+        number: u32,
+        name: &str,
+        dependencies: Vec<(&str, &str)>,
+    ) -> PathBuf {
         fs::create_dir_all(dir).expect("Failed to create migration directory");
 
         let file_path = dir.join(format!("{:04}_{}.py", number, name));
+
+        // Generate dependency lines
+        let dependency_lines = if dependencies.is_empty() {
+            String::new()
+        } else {
+            dependencies
+                .iter()
+                .map(|(dep_app, dep_migration)| {
+                    format!("        ('{}', {}),", dep_app, dep_migration)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
         let content = format!(
             r#"
 from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('test_app', {}),
+{}
     ]
 
     operations = []
 "#,
-            deps
+            dependency_lines
         );
         fs::write(&file_path, content).expect("Failed to write test migration file");
         file_path
     }
 
     #[test]
-    fn test_is_migration_file() {
-        assert!(is_migration_file("0001_initial.py"));
-        assert!(is_migration_file("0002_auto_20230901_1234.py"));
-        assert!(!is_migration_file("__init__.py"));
-        assert!(!is_migration_file("not_a_migration.py"));
-        assert!(!is_migration_file("a001_invalid.py"));
-        assert!(!is_migration_file("_0001_invalid.py"));
+    fn test_django_project_from_path() {
+        let (temp_dir, migrations_dir) = setup_test_env();
+
+        // Create test migrations
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("test_app", "'0001_initial'")],
+        );
+
+        let result = DjangoProject::from_path(temp_dir.path(), false);
+        assert!(result.is_ok());
+
+        let project = result.unwrap();
+        assert_eq!(project.apps.len(), 1);
+        assert!(project.apps.contains_key("test_app"));
+
+        let app = project.apps.get("test_app").unwrap();
+        assert_eq!(app.migrations.len(), 2);
     }
 
     #[test]
-    fn test_find_relevant_migrations() {
+    fn test_django_project_from_path_empty() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
 
-        // Skip the actual git operations in this test since they're tricky in tests
-        // Just check that the function runs and returns an empty list
-        let found_migrations = find_relevant_migrations(temp_dir.path());
-        assert!(found_migrations.len() == 0);
-    }
+        let result = DjangoProject::from_path(temp_dir.path(), false);
+        assert!(result.is_ok());
 
-
-    #[test]
-    fn test_get_number_from_migration() {
-        let path = Path::new("/test/0001_initial.py");
-        assert_eq!(get_number_from_migration(path), Some(1));
-
-        let invalid_path = Path::new("/test/not_a_migration.py");
-        assert_eq!(get_number_from_migration(invalid_path), None);
+        let project = result.unwrap();
+        assert_eq!(project.apps.len(), 0);
     }
 
     #[test]
-    fn test_get_name_from_migration() {
-        let path = Path::new("/test/0001_initial.py");
-        assert_eq!(get_name_from_migration(path), Some("initial".to_string()));
-
-        let path_no_extension = Path::new("/test/0001_initial");
-        assert_eq!(
-            get_name_from_migration(path_no_extension),
-            Some("initial".to_string())
-        );
-
-        let invalid_path = Path::new("/test/not_a_migration.py");
-        assert_eq!(get_name_from_migration(invalid_path), None);
-
-        let path_with_underscore = Path::new("/test/0001_a_migration.py");
-        assert_eq!(
-            get_name_from_migration(path_with_underscore),
-            Some("a_migration".to_string())
-        );
-    }
-
-    #[test]
-    fn test_find_migration_string_location_in_file() {
+    fn test_create_migration_dependency_changes() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let file_path = temp_dir.path().join("test_migration.py");
-        let content = r#"
-from django.db import migrations, models
+        let project_path = temp_dir.path();
 
-class Migration(migrations.Migration):
-    dependencies = [
-        ('test_app', '0001_initial'),
-    ]
+        // Create app_a with one migration
+        let app_a_dir = project_path.join("app_a");
+        let migrations_a_dir = app_a_dir.join("migrations");
+        fs::create_dir_all(&migrations_a_dir).expect("Failed to create migrations directory");
+        create_test_migration_file(&migrations_a_dir, 1, "initial", vec![]);
 
-    operations = []
-"#;
-        fs::write(&file_path, content).expect("Failed to write test file");
-
-        let result = find_migration_string_location_in_file(&file_path, "test_app");
-        assert!(result.is_ok());
-
-        let (start, end) = result.unwrap();
-        assert_eq!(start, 124);
-        assert_eq!(end, 138);
-
-        let invalid_file_path = temp_dir.path().join("invalid_migration.py");
-        let invalid_content = "This is not a valid migration file";
-        fs::write(&invalid_file_path, invalid_content).expect("Failed to write invalid test file");
-
-        let invalid_result = find_migration_string_location_in_file(&invalid_file_path, "test_app");
-        assert!(invalid_result.is_err());
-    }
-
-    #[test]
-    fn test_replace_range_in_file() {
-        let temp_dir = tempdir().expect("Failed to create temp directory");
-        let file_path = temp_dir.path().join("test_file.txt");
-        let content = "Hello world!";
-        fs::write(&file_path, content).expect("Failed to write test file");
-
-        let file_path_str = file_path.to_str().unwrap();
-        let result = replace_range_in_file(file_path_str, 6, 11, "Rust", false);
-        assert!(result.is_ok());
-
-        let new_content = fs::read_to_string(&file_path).expect("Failed to read test file");
-        assert_eq!(new_content, "Hello Rust!");
-
-        let result = replace_range_in_file(file_path_str, 0, 5, "Goodbye", true);
-        assert!(result.is_ok());
-
-        let unchanged_content = fs::read_to_string(&file_path).expect("Failed to read test file");
-        assert_eq!(unchanged_content, "Hello Rust!");
-    }
-
-    #[test]
-    fn test_migration_paths() {
-        let (_, migrations_dir) = setup_test_env();
-
-        let migration = Migration {
-            number: 1,
-            name: "initial".to_string(),
-            new_number: Some(2),
-            previous_migration_name: None,
-        };
-
-        let old_path = migration.old_full_path(&migrations_dir);
-        assert_eq!(
-            old_path.file_name().unwrap().to_str().unwrap(),
-            "0001_initial.py"
-        );
-
-        let new_path = migration.new_full_path(&migrations_dir).unwrap();
-        assert_eq!(
-            new_path.file_name().unwrap().to_str().unwrap(),
-            "0002_initial.py"
-        );
-    }
-
-    #[test]
-    fn test_migration_group_creation() {
-        let (_, migrations_dir) = setup_test_env();
-
-        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
-
-        let migration1 = migrations_dir.join("0001_initial.py");
-        let migration2 = migrations_dir.join("0002_add_field.py");
-
-        fs::write(&migration1, "test content").expect("Failed to write test migration");
-        fs::write(&migration2, "test content").expect("Failed to write test migration");
-
-        let result = MigrationGroup::create(vec![migration1.clone(), migration2.clone()]);
-        assert!(result.is_ok());
-
-        let groups = result.unwrap();
-        assert_eq!(groups.len(), 1);
-
-        let group = &groups[0];
-        assert_eq!(group.migrations.len(), 2);
-        assert!(group.migrations.contains_key(&1));
-        assert!(group.migrations.contains_key(&2));
-        assert_eq!(group.migration_dir, migrations_dir);
-    }
-
-    #[test]
-    fn test_find_highest_migration_number() {
-        let (_, migrations_dir) = setup_test_env();
-
-        let mut migrations = HashMap::new();
-        migrations.insert(
+        // Create app_b with a migration that depends on app_a
+        let app_b_dir = project_path.join("app_b");
+        let migrations_b_dir = app_b_dir.join("migrations");
+        fs::create_dir_all(&migrations_b_dir).expect("Failed to create migrations directory");
+        create_test_migration_file(
+            &migrations_b_dir,
             1,
-            Migration {
-                number: 1,
-                name: "initial".to_string(),
-                new_number: None,
-                previous_migration_name: None,
-            },
-        );
-        migrations.insert(
-            3,
-            Migration {
-                number: 3,
-                name: "add_field".to_string(),
-                new_number: None,
-                previous_migration_name: None,
-            },
+            "depend_on_a",
+            vec![("app_a", "'0001_initial'")],
         );
 
-        let group = MigrationGroup {
-            migrations,
-            migration_dir: migrations_dir,
-            migration_name_changes: None,
-        };
+        let mut project = DjangoProject::from_path(project_path, false).unwrap();
 
-        assert_eq!(group.find_highest_migration_number(), Some(3));
+        // Simulate renaming app_a's migration from 0001_initial to 0005_initial
+        let app_a = project.apps.get_mut("app_a").unwrap();
+        let migration_path = app_a
+            .migrations
+            .keys()
+            .find(|path| path.file_name().unwrap().to_str().unwrap() == "0001_initial.py")
+            .cloned()
+            .unwrap();
+
+        if let Some(migration) = app_a.migrations.get_mut(&migration_path) {
+            migration.name_change = Some(MigrationFileNameChange::new(
+                MigrationFileName("0001_initial".to_string()),
+                MigrationFileName("0005_initial".to_string()),
+            ));
+        }
+
+        // Call the method we're testing
+        project.create_migration_dependency_changes(false);
+
+        // Verify that app_b's migration dependency was updated
+        let app_b = project.apps.get("app_b").unwrap();
+        let migration_b = app_b
+            .migrations
+            .values()
+            .find(|m| m.file_name.0 == "0001_depend_on_a")
+            .unwrap();
+
+        assert!(migration_b.dependency_change.is_some());
+        let dep_change = migration_b.dependency_change.as_ref().unwrap();
+
+        // Original dependency should be app_a.0001_initial
+        assert_eq!(dep_change.old_dependencies.len(), 1);
+        assert_eq!(dep_change.old_dependencies[0].app, "app_a");
+        assert_eq!(
+            dep_change.old_dependencies[0].migration_file.0,
+            "0001_initial"
+        );
+
+        // New dependency should be app_a.0005_initial
+        assert_eq!(dep_change.new_dependencies.len(), 1);
+        assert_eq!(dep_change.new_dependencies[0].app, "app_a");
+        assert_eq!(
+            dep_change.new_dependencies[0].migration_file.0,
+            "0005_initial"
+        );
     }
 
     #[test]
-    fn test_get_app_name() {
+    fn test_django_project_apply_changes() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let app_dir = temp_dir.path().join("app_name");
-        fs::create_dir_all(&app_dir).expect("Failed to create app directory");
+        let project_path = temp_dir.path();
 
+        // Create app with migrations
+        let app_dir = project_path.join("myapp");
         let migrations_dir = app_dir.join("migrations");
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
-
-        let group = MigrationGroup {
-            migrations: HashMap::new(),
-            migration_dir: migrations_dir,
-            migration_name_changes: None,
-        };
-
-        assert_eq!(group.get_app_name(), "app_name");
-    }
-
-    #[test]
-    fn test_generate_new_migration_numbers() {
-        let (_, migrations_dir) = setup_test_env();
-
-        let last_head_migration =
-            create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
-
-        let mut migrations = HashMap::new();
-        migrations.insert(
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
             2,
-            Migration {
-                number: 2,
-                name: "add_field".to_string(),
-                new_number: None,
-                previous_migration_name: None,
-            },
-        );
-        migrations.insert(
-            3,
-            Migration {
-                number: 3,
-                name: "remove_field".to_string(),
-                new_number: None,
-                previous_migration_name: None,
-            },
+            "add_field",
+            vec![("myapp", "'0001_initial'")],
         );
 
-        let mut group = MigrationGroup {
-            migrations,
-            migration_dir: migrations_dir,
-            migration_name_changes: None,
-        };
+        // Create max_migration.txt file
+        let max_migration_path = migrations_dir.join("max_migration.txt");
+        fs::write(&max_migration_path, "0002_add_field\n")
+            .expect("Failed to write max migration file");
 
-        let result = group.generate_new_migration_numbers(&last_head_migration);
+        let mut project = DjangoProject::from_path(project_path, false).unwrap();
+
+        // Set up changes: rename migration and update max_migration
+        let app = project.apps.get_mut("myapp").unwrap();
+
+        // Add file name change
+        let migration_path = app
+            .migrations
+            .keys()
+            .find(|path| path.file_name().unwrap().to_str().unwrap() == "0002_add_field.py")
+            .cloned()
+            .unwrap();
+
+        if let Some(migration) = app.migrations.get_mut(&migration_path) {
+            migration.name_change = Some(MigrationFileNameChange::new(
+                MigrationFileName("0002_add_field".to_string()),
+                MigrationFileName("0003_add_field".to_string()),
+            ));
+        }
+
+        // Add max migration file change
+        app.max_migration_file = Some(MaxMigrationFile {
+            current_content: MigrationFileName("0002_add_field".to_string()),
+            new_content: Some(MigrationFileName("0003_add_field".to_string())),
+        });
+
+        // Apply all changes to disk
+        let result = project.apply_changes();
         assert!(result.is_ok());
 
-        assert_eq!(group.migrations.get(&2).unwrap().new_number, Some(2));
-        assert_eq!(group.migrations.get(&3).unwrap().new_number, Some(3));
+        // Verify file was renamed
+        let old_file_path = migrations_dir.join("0002_add_field.py");
+        let new_file_path = migrations_dir.join("0003_add_field.py");
+        assert!(!old_file_path.exists());
+        assert!(new_file_path.exists());
 
-        assert!(group.migration_name_changes.is_some());
-        let name_changes = group.migration_name_changes.unwrap();
-        assert_eq!(name_changes.get("add_field").unwrap(), "0002_add_field");
-        assert_eq!(
-            name_changes.get("remove_field").unwrap(),
-            "0003_remove_field"
-        );
+        // Verify max_migration.txt was updated
+        let max_content =
+            fs::read_to_string(&max_migration_path).expect("Failed to read max migration file");
+        assert_eq!(max_content.trim(), "0003_add_field");
     }
 
     #[test]
-    fn test_add_previous_migration_name() {
-        let (_, migrations_dir) = setup_test_env();
+    fn test_migration_parser_new() {
+        let (_temp_dir, migrations_dir) = setup_test_env();
 
-        let last_head_migration =
-            create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
+        // Create a valid migration file
+        let migration_path = create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
 
-        let mut migrations = HashMap::new();
-        migrations.insert(
-            2,
-            Migration {
-                number: 2,
-                name: "add_field".to_string(),
-                new_number: None,
-                previous_migration_name: None,
-            },
-        );
-        migrations.insert(
-            3,
-            Migration {
-                number: 3,
-                name: "remove_field".to_string(),
-                new_number: None,
-                previous_migration_name: None,
-            },
-        );
-
-        let mut group = MigrationGroup {
-            migrations,
-            migration_dir: migrations_dir,
-            migration_name_changes: None,
-        };
-
-        let result = group.add_previous_migration_name(&last_head_migration);
+        // Test successful parsing
+        let result = MigrationParser::new(&migration_path);
         assert!(result.is_ok());
 
-        assert_eq!(
-            group.migrations.get(&2).unwrap().previous_migration_name,
-            Some("initial".to_string())
-        );
-        assert_eq!(
-            group.migrations.get(&3).unwrap().previous_migration_name,
-            Some("add_field".to_string())
-        );
+        let parser = result.unwrap();
+        assert_eq!(parser.file_path, migration_path);
+        // AST should be created successfully (we can't easily test its contents without deep inspection)
     }
 
     #[test]
-    fn test_integration() {
-        let (_, migrations_dir) = setup_test_env();
+    fn test_migration_parser_new_nonexistent_file() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let nonexistent_path = temp_dir.path().join("nonexistent.py");
 
-        let last_head_migration =
-            create_test_migration_file(&migrations_dir, 1, "initial", "'0000_manual'");
-        let staged_migration1 =
-            create_test_migration_file(&migrations_dir, 2, "add_field", "'0001_initial'");
-        let staged_migration2 =
-            create_test_migration_file(&migrations_dir, 3, "remove_field", "'0002_add_field'");
-
-        let result = MigrationGroup::create(vec![staged_migration1, staged_migration2]);
-        assert!(result.is_ok());
-
-        let mut groups = result.unwrap();
-        assert_eq!(groups.len(), 1);
-
-        let found_head = groups[0].find_last_head_migration();
-        assert!(found_head.is_some());
-        assert_eq!(
-            found_head.unwrap().file_name().unwrap(),
-            last_head_migration.file_name().unwrap()
-        );
-
-        let result = groups[0].generate_new_migration_numbers(&last_head_migration);
-        assert!(result.is_ok());
-
-        let result = groups[0].add_previous_migration_name(&last_head_migration);
-        assert!(result.is_ok());
-
-        let result = groups[0].rename_files(true);
-        assert!(result.is_ok());
-
-        for migration in groups[0].migrations.values() {
-            let old_path = migration.old_full_path(&migrations_dir);
-            assert!(old_path.exists());
+        let result = MigrationParser::new(&nonexistent_path);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert!(error.contains("Failed to read file"));
         }
     }
 
     #[test]
-    fn test_fix() {
-        let (temp_dir, _) = setup_test_env();
+    fn test_migration_parser_new_invalid_python() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let invalid_python_path = temp_dir.path().join("invalid.py");
 
-        // Create migrations inside temp_dir rather than using the returned migrations_dir
-        // since we want to test the fix() function which expects the repo root path
-        let app_dir = temp_dir.path().join("test_app");
-        let migrations_dir = app_dir.join("migrations");
+        // Write invalid Python syntax
+        fs::write(
+            &invalid_python_path,
+            "this is not valid python syntax $$$ %%%",
+        )
+        .expect("Failed to write invalid Python file");
 
-        // Initialize a git repository
-        let repo = Repository::init(temp_dir.path()).expect("Failed to create git repo");
+        let result = MigrationParser::new(&invalid_python_path);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert!(error.contains("Failed to parse python statements"));
+        }
+    }
 
-        // Create some existing "head" migrations (not staged) that we'll rebase against
-        // Django migrations always start with 0001_initial
-        create_test_migration_file(&migrations_dir, 1, "initial", "None");
-        create_test_migration_file(&migrations_dir, 5, "existing_head", "'0001_initial'");
+    #[test]
+    fn test_migration_parser_get_dependencies_no_dependencies() {
+        let (_temp_dir, migrations_dir) = setup_test_env();
 
-        // Create new migrations that need to be rebased (these will be staged)
-        // These have lower numbers than the head migration, so they'll need renumbering
-        let staged_migration1 =
-            create_test_migration_file(&migrations_dir, 2, "new_feature", "'0001_initial'");
-        let staged_migration2 =
-            create_test_migration_file(&migrations_dir, 3, "another_feature", "'0002_new_feature'");
+        // Create migration with no dependencies
+        let migration_path = create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
 
-        // Add the new migrations to git index (stage them)
-        let mut index = repo.index().expect("Failed to get git index");
+        let parser = MigrationParser::new(&migration_path).unwrap();
+        let dependencies = parser.get_dependencies();
 
-        // Get relative paths for staging
-        let staged_path1 = staged_migration1.strip_prefix(temp_dir.path()).unwrap();
-        let staged_path2 = staged_migration2.strip_prefix(temp_dir.path()).unwrap();
+        assert_eq!(dependencies.len(), 0);
+    }
 
-        index
-            .add_path(staged_path1)
-            .expect("Failed to stage migration 1");
-        index
-            .add_path(staged_path2)
-            .expect("Failed to stage migration 2");
-        index.write().expect("Failed to write index");
+    #[test]
+    fn test_migration_parser_get_dependencies_single_dependency() {
+        let (_temp_dir, migrations_dir) = setup_test_env();
 
-        // Now test the fix function - it should find the staged migrations and process them
-        let result = fix(temp_dir.path().to_str().unwrap(), true);
+        // Create migration with one dependency
+        let migration_path = create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("myapp", "'0001_initial'")],
+        );
+
+        let parser = MigrationParser::new(&migration_path).unwrap();
+        let dependencies = parser.get_dependencies();
+
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies[0].app, "myapp");
+        assert_eq!(dependencies[0].migration_file.0, "0001_initial");
+    }
+
+    #[test]
+    fn test_migration_parser_get_dependencies_multiple_dependencies() {
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create migration with multiple dependencies
+        let migration_path = create_test_migration_file(
+            &migrations_dir,
+            3,
+            "complex",
+            vec![
+                ("myapp", "'0001_initial'"),
+                ("otherapp", "'0002_create_model'"),
+                ("thirdapp", "'0001_setup'"),
+            ],
+        );
+
+        let parser = MigrationParser::new(&migration_path).unwrap();
+        let dependencies = parser.get_dependencies();
+
+        assert_eq!(dependencies.len(), 3);
+
+        // Check first dependency
+        assert_eq!(dependencies[0].app, "myapp");
+        assert_eq!(dependencies[0].migration_file.0, "0001_initial");
+
+        // Check second dependency
+        assert_eq!(dependencies[1].app, "otherapp");
+        assert_eq!(dependencies[1].migration_file.0, "0002_create_model");
+
+        // Check third dependency
+        assert_eq!(dependencies[2].app, "thirdapp");
+        assert_eq!(dependencies[2].migration_file.0, "0001_setup");
+    }
+
+    #[test]
+    fn test_migration_parser_get_dependencies_cross_app() {
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create migration that depends on different apps
+        let migration_path = create_test_migration_file(
+            &migrations_dir,
+            1,
+            "depend_on_auth",
+            vec![
+                ("auth", "'0012_alter_user_first_name_max_length'"),
+                ("contenttypes", "'0002_remove_content_type_name'"),
+            ],
+        );
+
+        let parser = MigrationParser::new(&migration_path).unwrap();
+        let dependencies = parser.get_dependencies();
+
+        assert_eq!(dependencies.len(), 2);
+
+        // Check auth dependency
+        assert_eq!(dependencies[0].app, "auth");
+        assert_eq!(
+            dependencies[0].migration_file.0,
+            "0012_alter_user_first_name_max_length"
+        );
+
+        // Check contenttypes dependency
+        assert_eq!(dependencies[1].app, "contenttypes");
+        assert_eq!(
+            dependencies[1].migration_file.0,
+            "0002_remove_content_type_name"
+        );
+    }
+
+    #[test]
+    fn test_migration_parser_get_dependencies_malformed_file() {
+        // TODO: should this error instead??
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let malformed_path = temp_dir.path().join("malformed.py");
+
+        // Create a Python file that doesn't follow Django migration structure
+        let content = r#"
+# This is not a proper Django migration
+def some_function():
+    pass
+
+class NotAMigration:
+    def do_something(self):
+        return []
+"#;
+        fs::write(&malformed_path, content).expect("Failed to write malformed file");
+
+        let parser = MigrationParser::new(&malformed_path).unwrap();
+        let dependencies = parser.get_dependencies();
+
+        // Should return empty vector for malformed migration files
+        assert_eq!(dependencies.len(), 0);
+    }
+
+    #[test]
+    fn test_migration_filename_try_from_string_valid() {
+        // Test valid migration file names
+        let result = MigrationFileName::try_from("0001_initial".to_string());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().0, "0001_initial");
+
+        let result = MigrationFileName::try_from("0002_add_field".to_string());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().0, "0002_add_field");
+
+        let result = MigrationFileName::try_from("0123_complex_migration_name".to_string());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().0, "0123_complex_migration_name");
+    }
+
+    #[test]
+    fn test_migration_filename_try_from_string_with_py_extension() {
+        // Test that .py extension is stripped
+        let result = MigrationFileName::try_from("0001_initial.py".to_string());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().0, "0001_initial");
+
+        let result = MigrationFileName::try_from("0042_remove_field.py".to_string());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().0, "0042_remove_field");
+    }
+
+    #[test]
+    fn test_migration_filename_try_from_string_invalid() {
+        // Test invalid migration file names
+
+        // No underscore
+        let result = MigrationFileName::try_from("0001initial".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+
+        // No digits before underscore
+        let result = MigrationFileName::try_from("_initial".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+
+        // Non-digits before underscore
+        let result = MigrationFileName::try_from("abc_initial".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+
+        // Mixed alphanumeric before underscore
+        let result = MigrationFileName::try_from("001a_initial".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+
+        // Underscore at the beginning
+        let result = MigrationFileName::try_from("_0001_initial".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+    }
+
+    #[test]
+    fn test_migration_filename_try_from_string_edge_cases() {
+        let result = MigrationFileName::try_from("1_test".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+
+        let result = MigrationFileName::try_from("12_test".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+
+        let result = MigrationFileName::try_from("123_test".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+
+        let result = MigrationFileName::try_from("12345_test".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+
+        let result = MigrationFileName::try_from("0001_".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+    }
+
+    #[test]
+    fn test_migration_filename_try_from_string_valid_complex_names() {
+        let result = MigrationFileName::try_from("0001_test_with_underscores".to_string());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().0, "0001_test_with_underscores");
+
+        // Long descriptive name
+        let result =
+            MigrationFileName::try_from("0042_add_user_profile_and_update_permissions".to_string());
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap().0,
+            "0042_add_user_profile_and_update_permissions"
+        );
+    }
+
+    #[test]
+    fn test_migration_dependency_try_from_valid() {
+        // Test valid migration dependency tuple
+        let python_code = r#"('app_name', '0001_initial')"#;
+        let expr = ast::Expr::parse(python_code, "<test>").unwrap();
+
+        let result = MigrationDependency::try_from(&expr);
         assert!(result.is_ok());
 
-        // Verify that migrations were found and would be processed
-        // In dry-run mode, files aren't actually renamed, but we can verify the logic worked
-        // by checking that find_relevant_migrations finds our migration files (both staged and untracked)
-        let found_migrations = find_relevant_migrations(temp_dir.path());
-        assert_eq!(found_migrations.len(), 4); // Now finds all 4 migration files (staged + untracked)
+        let dependency = result.unwrap();
+        assert_eq!(dependency.app, "app_name");
+        assert_eq!(dependency.migration_file.0, "0001_initial");
+    }
 
-        // Verify the found migrations include both staged and untracked files
-        let migration_names: Vec<String> = found_migrations
-            .iter()
-            .filter_map(|path| path.file_name())
-            .map(|name| name.to_string_lossy().to_string())
-            .collect();
+    #[test]
+    fn test_migration_dependency_try_from_valid_complex() {
+        // Test with longer app and migration names
+        let python_code = r#"('my_complex_app', '0042_add_user_profile_and_permissions')"#;
+        let expr = ast::Expr::parse(python_code, "<test>").unwrap();
 
-        // Should include all 4 migration files: 2 staged + 2 untracked
-        assert!(migration_names.contains(&"0001_initial.py".to_string())); // untracked
-        assert!(migration_names.contains(&"0002_new_feature.py".to_string())); // staged
-        assert!(migration_names.contains(&"0003_another_feature.py".to_string())); // staged  
-        assert!(migration_names.contains(&"0005_existing_head.py".to_string())); // untracked
+        let result = MigrationDependency::try_from(&expr);
+        assert!(result.is_ok());
+
+        let dependency = result.unwrap();
+        assert_eq!(dependency.app, "my_complex_app");
+        assert_eq!(
+            dependency.migration_file.0,
+            "0042_add_user_profile_and_permissions"
+        );
+    }
+
+    #[test]
+    fn test_migration_dependency_try_from_invalid_not_tuple() {
+        // Test with non-tuple expression
+        let python_code = r#"'not_a_tuple'"#;
+        let expr = ast::Expr::parse(python_code, "<test>").unwrap();
+
+        let result = MigrationDependency::try_from(&expr);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Expression is not a tuple");
+    }
+
+    #[test]
+    fn test_migration_dependency_try_from_invalid_tuple_length() {
+        // Test with tuple having wrong number of elements
+        let python_code = r#"('app_name',)"#;
+        let expr = ast::Expr::parse(python_code, "<test>").unwrap();
+
+        let result = MigrationDependency::try_from(&expr);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Tuple must have exactly 2 elements");
+
+        // Test with too many elements
+        let python_code = r#"('app_name', '0001_initial', 'extra')"#;
+        let expr = ast::Expr::parse(python_code, "<test>").unwrap();
+
+        let result = MigrationDependency::try_from(&expr);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Tuple must have exactly 2 elements");
+    }
+
+    #[test]
+    fn test_migration_dependency_try_from_invalid_app_name() {
+        // Test with non-string app name
+        let python_code = r#"(123, '0001_initial')"#;
+        let expr = ast::Expr::parse(python_code, "<test>").unwrap();
+
+        let result = MigrationDependency::try_from(&expr);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("First tuple element is not a string constant")
+        );
+    }
+
+    #[test]
+    fn test_migration_dependency_try_from_invalid_migration_name() {
+        // Test with invalid migration filename format
+        let python_code = r#"('app_name', 'invalid_migration')"#;
+        let expr = ast::Expr::parse(python_code, "<test>").unwrap();
+
+        let result = MigrationDependency::try_from(&expr);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid migration file name"));
+    }
+
+    #[test]
+    fn test_migration_filename_change_apply_change() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let migrations_dir = temp_dir.path().join("migrations");
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        // Create a test migration file
+        let old_filename = "0001_initial.py";
+        let old_file_path = migrations_dir.join(old_filename);
+        fs::write(&old_file_path, "# Test migration content").expect("Failed to create test file");
+
+        // Verify the old file exists
+        assert!(old_file_path.exists());
+
+        // Create a MigrationFileNameChange
+        let name_change = MigrationFileNameChange::new(
+            MigrationFileName("0001_initial".to_string()),
+            MigrationFileName("0003_initial".to_string()),
+        );
+
+        // Apply the change
+        let result = name_change.apply_change(&migrations_dir);
+        assert!(result.is_ok());
+
+        // Verify the old file no longer exists and new file exists
+        assert!(!old_file_path.exists());
+        let new_file_path = migrations_dir.join("0003_initial.py");
+        assert!(new_file_path.exists());
+
+        // Verify the content was preserved
+        let content = fs::read_to_string(&new_file_path).expect("Failed to read new file");
+        assert_eq!(content, "# Test migration content");
+    }
+
+    #[test]
+    fn test_migration_filename_change_apply_change_nonexistent_file() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let migrations_dir = temp_dir.path().join("migrations");
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        // Create a MigrationFileNameChange for a non-existent file
+        let name_change = MigrationFileNameChange::new(
+            MigrationFileName("0001_nonexistent".to_string()),
+            MigrationFileName("0003_nonexistent".to_string()),
+        );
+
+        // Apply the change - should fail
+        let result = name_change.apply_change(&migrations_dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to rename file"));
+    }
+
+    #[test]
+    fn test_migration_dependency_change_apply_change() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let migrations_dir = temp_dir.path().join("migrations");
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        // Create a test migration file with dependencies
+        let migration_content = r#"
+from django.db import migrations, models
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ('myapp', '0001_initial'),
+        ('otherapp', '0002_add_field'),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name='TestModel',
+            fields=[
+                ('id', models.AutoField(primary_key=True)),
+            ],
+        ),
+    ]
+"#;
+        let migration_file = migrations_dir.join("0003_test_migration.py");
+        fs::write(&migration_file, migration_content)
+            .expect("Failed to create test migration file");
+
+        // Create old and new dependencies
+        let old_dependencies = vec![
+            MigrationDependency {
+                app: "myapp".to_string(),
+                migration_file: MigrationFileName("0001_initial".to_string()),
+            },
+            MigrationDependency {
+                app: "otherapp".to_string(),
+                migration_file: MigrationFileName("0002_add_field".to_string()),
+            },
+        ];
+
+        let new_dependencies = vec![
+            MigrationDependency {
+                app: "myapp".to_string(),
+                migration_file: MigrationFileName("0005_initial".to_string()),
+            },
+            MigrationDependency {
+                app: "otherapp".to_string(),
+                migration_file: MigrationFileName("0007_add_field".to_string()),
+            },
+        ];
+
+        // Create a MigrationDependencyChange
+        let dependency_change = MigrationDependencyChange::new(old_dependencies, new_dependencies);
+
+        // Apply the change
+        let result = dependency_change.apply_change(&migration_file);
+        assert!(result.is_ok());
+
+        // Read the updated file and verify the dependencies were changed
+        let updated_content =
+            fs::read_to_string(&migration_file).expect("Failed to read updated file");
+        assert!(updated_content.contains("('myapp', '0005_initial')"));
+        assert!(updated_content.contains("('otherapp', '0007_add_field')"));
+        assert!(!updated_content.contains("('myapp', '0001_initial')"));
+        assert!(!updated_content.contains("('otherapp', '0002_add_field')"));
+    }
+
+    #[test]
+    fn test_migration_dependency_change_apply_change_empty_dependencies() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let migrations_dir = temp_dir.path().join("migrations");
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        // Create a migration file with empty dependencies
+        let migration_content = r#"
+from django.db import migrations, models
+
+class Migration(migrations.Migration):
+    dependencies = []
+
+    operations = []
+"#;
+        let migration_file = migrations_dir.join("0001_initial.py");
+        fs::write(&migration_file, migration_content)
+            .expect("Failed to create test migration file");
+
+        // Create dependency change from empty to having dependencies
+        let old_dependencies = vec![];
+        let new_dependencies = vec![MigrationDependency {
+            app: "myapp".to_string(),
+            migration_file: MigrationFileName("0002_add_field".to_string()),
+        }];
+
+        let dependency_change = MigrationDependencyChange::new(old_dependencies, new_dependencies);
+
+        // Apply the change
+        let result = dependency_change.apply_change(&migration_file);
+        assert!(result.is_ok());
+
+        // Verify the dependencies were added
+        let updated_content =
+            fs::read_to_string(&migration_file).expect("Failed to read updated file");
+        assert!(updated_content.contains("('myapp', '0002_add_field')"));
+    }
+
+    #[test]
+    fn test_migration_dependency_change_apply_change_nonexistent_file() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let migrations_dir = temp_dir.path().join("migrations");
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        let migration_file = migrations_dir.join("nonexistent.py");
+
+        let dependency_change = MigrationDependencyChange::new(vec![], vec![]);
+
+        // Apply change to non-existent file - should fail
+        let result = dependency_change.apply_change(&migration_file);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_max_migration_file_apply_change() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let migrations_dir = temp_dir.path().join("migrations");
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        // Create a MaxMigrationFile with new content
+        let max_migration_file = MaxMigrationFile {
+            current_content: MigrationFileName("0001_initial".to_string()),
+            new_content: Some(MigrationFileName("0005_updated".to_string())),
+        };
+
+        // Apply the change
+        let result = max_migration_file.apply_change(&migrations_dir);
+        assert!(result.is_ok());
+
+        // Verify the max_migration.txt file was created with correct content
+        let max_migration_path = migrations_dir.join("max_migration.txt");
+        assert!(max_migration_path.exists());
+
+        let content =
+            fs::read_to_string(&max_migration_path).expect("Failed to read max migration file");
+        assert_eq!(content, "0005_updated\n");
+    }
+
+    #[test]
+    fn test_max_migration_file_apply_change_overwrite_existing() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let migrations_dir = temp_dir.path().join("migrations");
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        // Create an existing max_migration.txt file
+        let max_migration_path = migrations_dir.join("max_migration.txt");
+        fs::write(&max_migration_path, "0003_old_content\n")
+            .expect("Failed to create existing max migration file");
+
+        // Create a MaxMigrationFile with new content
+        let max_migration_file = MaxMigrationFile {
+            current_content: MigrationFileName("0003_old_content".to_string()),
+            new_content: Some(MigrationFileName("0007_new_content".to_string())),
+        };
+
+        // Apply the change
+        let result = max_migration_file.apply_change(&migrations_dir);
+        assert!(result.is_ok());
+
+        // Verify the file was overwritten with new content
+        let content =
+            fs::read_to_string(&max_migration_path).expect("Failed to read max migration file");
+        assert_eq!(content, "0007_new_content\n");
+    }
+
+    #[test]
+    fn test_max_migration_file_apply_change_no_new_content() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let migrations_dir = temp_dir.path().join("migrations");
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        // Create a MaxMigrationFile without new content
+        let max_migration_file = MaxMigrationFile {
+            current_content: MigrationFileName("0001_initial".to_string()),
+            new_content: None,
+        };
+
+        // Apply the change - should do nothing
+        let result = max_migration_file.apply_change(&migrations_dir);
+        assert!(result.is_ok());
+
+        // Verify no file was created
+        let max_migration_path = migrations_dir.join("max_migration.txt");
+        assert!(!max_migration_path.exists());
+    }
+
+    #[test]
+    fn test_max_migration_file_apply_change_invalid_directory() {
+        // Use a path that doesn't exist and can't be created
+        let invalid_dir = PathBuf::from("/nonexistent/invalid/path/migrations");
+
+        let max_migration_file = MaxMigrationFile {
+            current_content: MigrationFileName("0001_initial".to_string()),
+            new_content: Some(MigrationFileName("0005_updated".to_string())),
+        };
+
+        // Apply the change - should fail
+        let result = max_migration_file.apply_change(&invalid_dir);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Failed to write max migration file")
+        );
+    }
+
+    #[test]
+    fn test_migration_group_create_migration_name_changes() {
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create test migrations - some from head, some from rebased branch
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("test_app", "'0001_initial'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "remove_field",
+            vec![("test_app", "'0002_add_field'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            4,
+            "update_model",
+            vec![("test_app", "'0003_remove_field'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "rebased_remove_field",
+            vec![("test_app", "'0002_add_field'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            4,
+            "rebased_update_model",
+            vec![("test_app", "'0003_rebased_remove_field'")],
+        );
+
+        let mut project =
+            DjangoProject::from_path(migrations_dir.parent().unwrap().parent().unwrap(), false)
+                .unwrap();
+        let app = project.apps.get_mut("test_app").unwrap();
+
+        // Mark migrations 3 and 4 as from rebased branch
+        for (path, migration) in app.migrations.iter_mut() {
+            let filename = path.file_name().unwrap().to_str().unwrap();
+            if filename == "0003_rebased_remove_field.py"
+                || filename == "0004_rebased_update_model.py"
+            {
+                migration.from_rebased_branch = true;
+            }
+        }
+
+        // Apply migration name changes
+        app.create_migration_name_changes();
+
+        // Verify that rebased migrations got renamed starting from highest head number + 1
+        let migration_0003_path = app
+            .migrations
+            .keys()
+            .find(|path| {
+                path.file_name().unwrap().to_str().unwrap() == "0003_rebased_remove_field.py"
+            })
+            .cloned()
+            .unwrap();
+        let migration_0004_path = app
+            .migrations
+            .keys()
+            .find(|path| {
+                path.file_name().unwrap().to_str().unwrap() == "0004_rebased_update_model.py"
+            })
+            .cloned()
+            .unwrap();
+
+        let migration_0003 = app.migrations.get(&migration_0003_path).unwrap();
+        let migration_0004 = app.migrations.get(&migration_0004_path).unwrap();
+
+        // Migration 0003 should be renamed to 0003 (highest head is 2, so rebased start at 3)
+        assert!(migration_0003.name_change.is_some());
+        let name_change_0003 = migration_0003.name_change.as_ref().unwrap();
+        assert_eq!(name_change_0003.old_name.0, "0003_rebased_remove_field");
+        assert_eq!(name_change_0003.new_name.0, "0005_rebased_remove_field");
+
+        // Migration 0004 should be renamed to 0004
+        assert!(migration_0004.name_change.is_some());
+        let name_change_0004 = migration_0004.name_change.as_ref().unwrap();
+        assert_eq!(name_change_0004.old_name.0, "0004_rebased_update_model");
+        assert_eq!(name_change_0004.new_name.0, "0006_rebased_update_model");
+    }
+
+    #[test]
+    fn test_migration_group_create_migration_dependency_changes() {
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create migrations with dependencies
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("test_app", "'0001_initial'")],
+        );
+
+        let mut project =
+            DjangoProject::from_path(migrations_dir.parent().unwrap().parent().unwrap(), false)
+                .unwrap();
+        let app = project.apps.get_mut("test_app").unwrap();
+
+        // Set up scenario: migration 0001 gets renamed and 0002 is from rebased branch
+        let migration_0001_path = app
+            .migrations
+            .keys()
+            .find(|path| path.file_name().unwrap().to_str().unwrap() == "0001_initial.py")
+            .cloned()
+            .unwrap();
+
+        if let Some(migration) = app.migrations.get_mut(&migration_0001_path) {
+            migration.name_change = Some(MigrationFileNameChange::new(
+                MigrationFileName("0001_initial".to_string()),
+                MigrationFileName("0003_initial".to_string()),
+            ));
+        }
+
+        // Mark migration 0002 as from rebased branch
+        let migration_0002_path = app
+            .migrations
+            .keys()
+            .find(|path| path.file_name().unwrap().to_str().unwrap() == "0002_add_field.py")
+            .cloned()
+            .unwrap();
+
+        if let Some(migration) = app.migrations.get_mut(&migration_0002_path) {
+            migration.from_rebased_branch = true;
+        }
+
+        // Create lookup table (simulating what DjangoProject does)
+        let mut lookup = std::collections::HashMap::new();
+        lookup.insert(
+            "test_app".to_string(),
+            vec![MigrationFileNameChange::new(
+                MigrationFileName("0001_initial".to_string()),
+                MigrationFileName("0003_initial".to_string()),
+            )],
+        );
+
+        // Test same_app = true (rebased migration within same app)
+        app.create_migration_dependency_changes(true, &lookup);
+
+        // Verify that migration 0002 has its dependency updated
+        let migration_0002 = app.migrations.get(&migration_0002_path).unwrap();
+        assert!(migration_0002.dependency_change.is_some());
+
+        let dep_change = migration_0002.dependency_change.as_ref().unwrap();
+        assert_eq!(dep_change.old_dependencies.len(), 1);
+        assert_eq!(dep_change.old_dependencies[0].app, "test_app");
+        assert_eq!(
+            dep_change.old_dependencies[0].migration_file.0,
+            "0001_initial"
+        );
+
+        assert_eq!(dep_change.new_dependencies.len(), 1);
+        assert_eq!(dep_change.new_dependencies[0].app, "test_app");
+        assert_eq!(
+            dep_change.new_dependencies[0].migration_file.0,
+            "0003_initial"
+        );
+    }
+
+    #[test]
+    fn test_migration_group_create_migration_dependency_changes_cross_app() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let project_path = temp_dir.path();
+
+        // Create app_a with migration
+        let app_a_dir = project_path.join("app_a");
+        let migrations_a_dir = app_a_dir.join("migrations");
+        fs::create_dir_all(&migrations_a_dir).expect("Failed to create migrations directory");
+        create_test_migration_file(&migrations_a_dir, 1, "initial", vec![]);
+
+        // Create app_b with migration that depends on app_a
+        let app_b_dir = project_path.join("app_b");
+        let migrations_b_dir = app_b_dir.join("migrations");
+        fs::create_dir_all(&migrations_b_dir).expect("Failed to create migrations directory");
+        create_test_migration_file(
+            &migrations_b_dir,
+            1,
+            "depend_on_a",
+            vec![("app_a", "'0001_initial'")],
+        );
+
+        let mut project = DjangoProject::from_path(project_path, false).unwrap();
+
+        // Create lookup table with app_a migration rename
+        let mut lookup = std::collections::HashMap::new();
+        lookup.insert(
+            "app_a".to_string(),
+            vec![MigrationFileNameChange::new(
+                MigrationFileName("0001_initial".to_string()),
+                MigrationFileName("0005_initial".to_string()),
+            )],
+        );
+
+        // Test same_app = false (cross-app dependency update)
+        let app_b = project.apps.get_mut("app_b").unwrap();
+        app_b.create_migration_dependency_changes(false, &lookup);
+
+        // Verify that app_b's migration has its dependency updated
+        let migration_b = app_b
+            .migrations
+            .values()
+            .find(|m| m.file_name.0 == "0001_depend_on_a")
+            .unwrap();
+
+        assert!(migration_b.dependency_change.is_some());
+        let dep_change = migration_b.dependency_change.as_ref().unwrap();
+
+        assert_eq!(dep_change.old_dependencies.len(), 1);
+        assert_eq!(dep_change.old_dependencies[0].app, "app_a");
+        assert_eq!(
+            dep_change.old_dependencies[0].migration_file.0,
+            "0001_initial"
+        );
+
+        assert_eq!(dep_change.new_dependencies.len(), 1);
+        assert_eq!(dep_change.new_dependencies[0].app, "app_a");
+        assert_eq!(
+            dep_change.new_dependencies[0].migration_file.0,
+            "0005_initial"
+        );
     }
 }
