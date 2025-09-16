@@ -79,6 +79,23 @@ git rebase --continue
 
 - `--path <PATH>`: Path to the Django project root (default: current directory)
 - `--dry-run`: Show what would be changed without making modifications
+- `--all-dirs`: Scan all directories without skipping common build/cache directories (slower but comprehensive)
+
+### Performance Notes
+
+By default, the tool skips common directories that are unlikely to contain Django migrations for better performance:
+
+- **Version control**: `.git`, `.svn`, `.hg`
+- **Python environments**: `venv`, `.venv`, `env`, `.env`, `virtualenv`, `__pycache__`, `.pytest_cache`, `.tox`
+- **Node.js**: `node_modules`, `.npm`, `.yarn`
+- **Build/cache**: `build`, `dist`, `.cache`, `target`, `.mypy_cache`, `.coverage`, `htmlcov`
+- **IDE/Editor**: `.vscode`, `.idea`, `.sublime-project`, `.sublime-workspace`
+- **OS files**: `.DS_Store`, `Thumbs.db`
+- **Django assets**: `static`, `staticfiles`, `media`
+- **Docker**: `.docker`
+- **Documentation**: `docs`, `_build`
+
+Use `--all-dirs` if you have Django apps in unconventional locations or if the default filtering is missing your migrations.
 
 ## How It Works
 
