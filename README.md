@@ -84,32 +84,13 @@ git rebase --continue
 
 ## Python Package
 
-### Installation
+Install the Python library for programmatic use:
 
 ```bash
 pip install rebase-migrations
 ```
 
-### Usage
-
-```python
-import rebase_migrations
-
-# Preview changes (dry run)
-rebase_migrations.dry_run('/path/to/django/project')
-
-# Apply changes
-rebase_migrations.execute('/path/to/django/project')
-
-# Use with current directory or relative paths
-rebase_migrations.dry_run('.')
-rebase_migrations.execute('~/my-django-project', all_dirs=True)
-```
-
-### Parameters
-
-- `path` (str): Path to the Django project directory
-- `all_dirs` (bool): If True, scan all directories (slower but comprehensive). Default: False
+For detailed Python usage documentation, see [python/README.md](python/README.md) or visit the [PyPI page](https://pypi.org/project/rebase-migrations/).
 
 ## Performance Notes
 

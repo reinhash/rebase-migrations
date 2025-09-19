@@ -10,7 +10,7 @@ authors = [
     { name = "Reinhard Scheuerle", email = "reinhard.scheuerle@gmail.com" },
 ]
 license = "MIT"
-readme = "README.md"
+readme = "python/README.md"
 keywords = ["django", "migrations", "git", "rebase", "conflict-resolution"]
 classifiers = [
     "Development Status :: 4 - Beta",
