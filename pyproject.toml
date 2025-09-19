@@ -1,0 +1,41 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rebase-migrations"
+version = "0.2.0"
+description = "Python library for Django migration conflict resolution during git rebases"
+authors = [
+    { name = "Reinhard Scheuerle", email = "reinhard.scheuerle@gmail.com" },
+]
+license = "MIT"
+readme = "python/README.md"
+keywords = ["django", "migrations", "git", "rebase", "conflict-resolution"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Version Control :: Git",
+    "Topic :: Database",
+    "Framework :: Django",
+]
+requires-python = ">=3.8"
+license-files = ["LICENSE"]
+
+[project.urls]
+Homepage = "https://github.com/reinhash/rebase-migrations"
+Repository = "https://github.com/reinhash/rebase-migrations"
+
+[tool.maturin]
+# Use mixed layout to include both Rust extension and Python wrapper code
+python-source = "python"
+# "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
+features = ["pyo3/extension-module"]

@@ -1,1 +1,19 @@
 /target
+
+# Python compiled extensions
+*.so
+*.dylib
+*.dll
+*.pyd
+
+# Maturin build artifacts
+dist/
+*.egg-info/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/

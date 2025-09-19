@@ -1,6 +1,6 @@
 # Django Migration Rebase Tool
 
-A Rust CLI tool that automatically renumbers Django migration files to resolve conflicts during git rebases. Designed to work seamlessly with [django-linear-migrations](https://github.com/adamchainz/django-linear-migrations).
+A tool that automatically renumbers Django migration files to resolve conflicts during git rebases. Available as both a standalone CLI binary and a Python library. Designed to work seamlessly with [django-linear-migrations](https://github.com/adamchainz/django-linear-migrations).
 
 ## The Problem
 
@@ -31,20 +31,21 @@ This tool automatically detects and renumbers conflicting migrations during reba
 - 📄 Updates `max_migration.txt` files
 - 🧪 Dry Run Mode: Preview changes before applying them
 
-## Installation
+## CLI Tool
 
-### Download Pre-built Binary (Recommended)
+### Installation
 
-Download the latest binary for your platform from the [releases page](https://github.com/reinhash/rebase-migrations/releases):
+#### Download Pre-built Binary (Recommended)
 
+Download the latest binary for your platform from the [releases page](https://github.com/reinhash/rebase-migrations/releases)
 
-### Install from Source (Requires Rust)
+#### Install from Source (Requires Rust)
 
 ```bash
 cargo install --git https://github.com/reinhash/rebase-migrations
 ```
 
-### Compile from Source (Requires Rust)
+#### Compile from Source (Requires Rust)
 
 ```bash
 git clone https://github.com/reinhash/rebase-migrations
@@ -52,9 +53,9 @@ cd rebase-migrations
 cargo build --release
 ```
 
-## Usage
+### Usage
 
-### Basic Usage
+#### Basic Usage
 
 ```bash
 # Preview changes (dry run)
@@ -64,7 +65,7 @@ rebase-migrations --dry-run
 rebase-migrations
 ```
 
-### Common Workflow
+#### Common Workflow
 
 1. **During a rebase** when you encounter migration conflicts:
 ```bash
@@ -75,13 +76,23 @@ git add .
 git rebase --continue
 ```
 
-### Options
+#### Options
 
 - `--path <PATH>`: Path to the Django project root (default: current directory)
 - `--dry-run`: Show what would be changed without making modifications
 - `--all-dirs`: Scan all directories without skipping common build/cache directories (slower but comprehensive)
 
-### Performance Notes
+## Python Package
+
+Install the Python library for programmatic use:
+
+```bash
+pip install rebase-migrations
+```
+
+For detailed Python usage documentation, see [python/README.md](python/README.md) or visit the [PyPI page](https://pypi.org/project/rebase-migrations/).
+
+## Performance Notes
 
 By default, the tool skips common directories that are unlikely to contain Django migrations for better performance:
 
