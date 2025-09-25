@@ -4,7 +4,7 @@ mod tables;
 mod utils;
 
 use cli::build as cli_builder;
-use cli::{DRY_RUN, PATH, ALL_DIRS};
+use cli::{ALL_DIRS, DRY_RUN, PATH};
 
 fn main() {
     let command = cli_builder();

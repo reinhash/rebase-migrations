@@ -1,18 +1,19 @@
-use crate::rebase::{Migration, MigrationGroup};
+use crate::rebase::{Migration, MigrationGroup, MaxMigrationResult};
 use cli_table::{Cell, Color, Style, Table};
 use std::collections::HashMap;
 
 pub enum TableOptions<'a> {
     Summary(&'a HashMap<String, MigrationGroup>),
-    MigrationChanges(&'a str, &'a HashMap<std::path::PathBuf, Migration>),
+    MigrationChanges(&'a str, &'a MigrationGroup),
     MaxMigrationChanges(&'a HashMap<String, MigrationGroup>),
 }
 
 pub fn get_table(options: TableOptions<'_>) -> cli_table::TableStruct {
     match options {
         TableOptions::Summary(groups) => get_summary_table(groups),
-        TableOptions::MigrationChanges(app_name, migrations) => {
-            get_migration_changes_table(app_name, migrations)
+        TableOptions::MigrationChanges(app_name, group) => {
+            let combined_migrations = group.migrations.values().chain(group.rebased_migrations.iter());
+            get_migration_changes_table(app_name, combined_migrations)
         }
         TableOptions::MaxMigrationChanges(groups) => get_max_migration_changes_table(groups),
     }
@@ -23,26 +24,39 @@ fn get_summary_table(groups: &HashMap<String, MigrationGroup>) -> cli_table::Tab
         .values()
         .map(|group| {
             let app_name = group.get_app_name();
-            let total_migrations = group.migrations.len();
+            let total_migrations = group.migrations.len() + group.rebased_migrations.len();
 
             let file_renames = group
                 .migrations
                 .values()
                 .filter(|m| m.name_change.is_some())
-                .count();
+                .count()
+                + group
+                    .rebased_migrations
+                    .iter()
+                    .filter(|m| m.name_change.is_some())
+                    .count();
 
             let dependency_updates = group
                 .migrations
                 .values()
                 .filter(|m| m.dependency_change.is_some())
-                .count();
+                .count()
+                + group
+                    .rebased_migrations
+                    .iter()
+                    .filter(|m| m.dependency_change.is_some())
+                    .count();
 
-            let max_migration_update = group
-                .max_migration_file
-                .as_ref()
-                .and_then(|f| f.new_content.as_ref())
-                .map(|_| "Yes")
-                .unwrap_or("No");
+            let max_migration_update = if let MaxMigrationResult::Ok(max_file) = &group.max_migration_result {
+                if max_file.new_content.is_some() {
+                    "Yes"
+                } else {
+                    "No"
+                }
+            } else {
+                "No"
+            };
 
             vec![
                 app_name.cell().bold(true),
@@ -89,12 +103,11 @@ fn get_summary_table(groups: &HashMap<String, MigrationGroup>) -> cli_table::Tab
     table
 }
 
-fn get_migration_changes_table(
+fn get_migration_changes_table<'a>(
     app_name: &str,
-    migrations: &HashMap<std::path::PathBuf, Migration>,
+    migrations: impl Iterator<Item = &'a Migration>,
 ) -> cli_table::TableStruct {
     let table = migrations
-        .values()
         .filter(|migration| {
             migration.name_change.is_some() || migration.dependency_change.is_some()
         })
@@ -156,9 +169,9 @@ fn get_max_migration_changes_table(
     let table = groups
         .values()
         .filter_map(|group| {
-            group.max_migration_file.as_ref().and_then(|max_file| {
-                max_file.new_content.as_ref().map(|new_content| {
-                    vec![
+            if let MaxMigrationResult::Ok(max_file) = &group.max_migration_result {
+                if let Some(new_content) = &max_file.new_content {
+                    Some(vec![
                         group.get_app_name().cell().bold(true),
                         max_file
                             .current_content
@@ -171,9 +184,13 @@ fn get_max_migration_changes_table(
                             .clone()
                             .cell()
                             .foreground_color(Some(Color::Green)),
-                    ]
-                })
-            })
+                    ])
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         })
         .collect::<Vec<_>>()
         .table()

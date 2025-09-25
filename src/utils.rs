@@ -1,7 +1,9 @@
-#[derive(Debug)]
+use crate::rebase::MigrationFileName;
+
+#[derive(Debug, Clone)]
 pub struct MergeConflict {
-    pub head: String,
-    pub incoming_change: String,
+    pub head: MigrationFileName,
+    pub incoming_change: MigrationFileName,
 }
 
 impl TryFrom<String> for MergeConflict {
@@ -13,16 +15,24 @@ impl TryFrom<String> for MergeConflict {
             && content.contains(">>>>>>> ")
         {
             let head = content.split("<<<<<<< HEAD").nth(1).unwrap_or("");
-            let head = head.split("=======").nth(0).unwrap_or("").trim();
+            let head = head
+                .split("=======")
+                .nth(0)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let head = MigrationFileName::try_from(head)?;
             let incoming_change = content.split("=======").nth(1).unwrap_or("");
             let incoming_change = incoming_change
                 .split(">>>>>>> ")
                 .nth(0)
                 .unwrap_or("")
-                .trim();
+                .trim()
+                .to_string();
+            let incoming_change = MigrationFileName::try_from(incoming_change)?;
             return Ok(Self {
-                head: head.to_string(),
-                incoming_change: incoming_change.to_string(),
+                head: head,
+                incoming_change: incoming_change,
             });
         }
         Err(format!("No merge conflict found in {}", content))
@@ -88,10 +98,10 @@ mod tests {
 
         let result = MergeConflict::try_from(conflict_content.to_string());
         assert!(result.is_ok());
-        
+
         let conflict = result.unwrap();
-        assert_eq!(conflict.head, "0001_initial.py");
-        assert_eq!(conflict.incoming_change, "0002_add_field.py");
+        assert_eq!(conflict.head.0, "0001_initial");
+        assert_eq!(conflict.incoming_change.0, "0002_add_field");
     }
 
     #[test]
@@ -104,10 +114,10 @@ mod tests {
 
         let result = MergeConflict::try_from(conflict_content.to_string());
         assert!(result.is_ok());
-        
+
         let conflict = result.unwrap();
-        assert_eq!(conflict.head, "0003_remove_field.py");
-        assert_eq!(conflict.incoming_change, "0004_modify_model.py");
+        assert_eq!(conflict.head.0, "0003_remove_field");
+        assert_eq!(conflict.incoming_change.0, "0004_modify_model");
     }
 
     #[test]
@@ -167,9 +177,15 @@ Some content after"#;
 
         let result = MergeConflict::try_from(conflict_content.to_string());
         assert!(result.is_ok());
-        
+
         let conflict = result.unwrap();
-        assert_eq!(conflict.head, "0005_complex_migration.py\nAdditional content");
-        assert_eq!(conflict.incoming_change, "0006_new_migration.py\nMore content here");
+        assert_eq!(
+            conflict.head.0,
+            "0005_complex_migration.py\nAdditional content"
+        );
+        assert_eq!(
+            conflict.incoming_change.0,
+            "0006_new_migration.py\nMore content here"
+        );
     }
 }
