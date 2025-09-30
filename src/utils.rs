@@ -31,8 +31,8 @@ impl TryFrom<String> for MergeConflict {
                 .to_string();
             let incoming_change = MigrationFileName::try_from(incoming_change)?;
             return Ok(Self {
-                head: head,
-                incoming_change: incoming_change,
+                head,
+                incoming_change,
             });
         }
         Err(format!("No merge conflict found in {}", content))

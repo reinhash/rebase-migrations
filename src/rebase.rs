@@ -401,12 +401,12 @@ impl MigrationFileName {
     }
 
     fn name(&self) -> String {
-        self.0.splitn(2, '_').nth(1).unwrap().to_string()
+        self.0.split_once('_').unwrap().1.to_string()
     }
 
     fn number(&self) -> u32 {
         self.0
-            .splitn(2, '_')
+            .split('_')
             .next()
             .expect("we validate on create, this cannot fail")
             .parse()
@@ -471,7 +471,7 @@ impl MigrationFileNameChange {
         Self { old_name, new_name }
     }
 
-    fn apply_change(&self, migrations_dir: &PathBuf) -> Result<(), String> {
+    fn apply_change(&self, migrations_dir: &Path) -> Result<(), String> {
         let old_path = migrations_dir.join(&self.old_name.0).with_extension("py");
         let new_path = migrations_dir.join(&self.new_name.0).with_extension("py");
         std::fs::rename(old_path, new_path).map_err(|e| format!("Failed to rename file: {}", e))?;
@@ -583,8 +583,7 @@ impl Iterator for MigrationDependencyIterator {
 
 impl MigrationDependencyIterator {
     fn new(initial_migration: Migration) -> Self {
-        let mut migration_stack = Vec::new();
-        migration_stack.push(initial_migration);
+        let migration_stack = vec![initial_migration];
 
         Self {
             migration_stack,
@@ -613,7 +612,7 @@ impl MigrationDependencyIterator {
                 dependency.migration_file.0, dependency.app
             ))
         } else {
-            Err(format!("Migration is of another app."))
+            Err("Migration is of another app.".to_string())
         }
     }
 }
@@ -748,7 +747,7 @@ impl MaxMigrationFile {
     /// # Errors
     ///
     /// Returns an error if the file write operation fails.
-    fn apply_change(&self, migrations_dir: &PathBuf) -> Result<(), String> {
+    fn apply_change(&self, migrations_dir: &Path) -> Result<(), String> {
         if let Some(new_content) = &self.new_content {
             let max_migration_path = migrations_dir.join("max_migration").with_extension("txt");
             let content = format!("{}\n", new_content.0);
@@ -796,7 +795,7 @@ impl MigrationGroup {
 
         for migration in all_migrations {
             // same app and rebased migration
-            if same_app == true && migration.from_rebased_branch {
+            if same_app && migration.from_rebased_branch {
                 let mut updated_dependencies = migration.dependencies.clone();
                 let mut has_changes = false;
 
@@ -965,7 +964,7 @@ impl MigrationGroup {
                 .map(|m| m.file_name.number())
                 .max();
         }
-        return self.migrations.values().map(|m| m.file_name.number()).max();
+        self.migrations.values().map(|m| m.file_name.number()).max()
     }
 
     /// Finds the single migration with the highest number in this group.
@@ -1053,13 +1052,13 @@ impl MigrationGroup {
         for migration in head_migration.iter() {
             migrations.insert(migration.file_path.clone(), migration);
         }
-        return Ok(Self {
+        Ok(Self {
             migrations,
             directory,
             last_common_migration: None,
-            max_migration_result: max_migration_result,
+            max_migration_result,
             rebased_migrations: Vec::new(),
-        });
+        })
     }
 
     fn load_max_migration_file(directory: &Path) -> MaxMigrationResult {
@@ -1095,7 +1094,7 @@ pub fn fix(search_path: &str, dry_run: bool, all_dirs: bool) -> Result<(), Strin
     for group in django_project.apps.values_mut() {
         if let MaxMigrationResult::Conflict(conflict) = &group.max_migration_result {
             let conflict_clone = conflict.clone();
-            let _ok = group.set_last_common_migration(conflict_clone.incoming_change.clone())?;
+            group.set_last_common_migration(conflict_clone.incoming_change.clone())?;
             group.create_migration_name_changes(conflict_clone);
         }
     }
@@ -1103,7 +1102,7 @@ pub fn fix(search_path: &str, dry_run: bool, all_dirs: bool) -> Result<(), Strin
     django_project.create_migration_dependency_changes(true);
     django_project.create_migration_dependency_changes(false);
 
-    if dry_run == true {
+    if dry_run {
         django_project.changes_summary();
     } else {
         django_project.apply_changes()?;
@@ -2043,7 +2042,7 @@ class Migration(migrations.Migration):
             head: MigrationFileName("0002_add_field".to_string()),
             incoming_change: MigrationFileName("0004_rebased_update_model".to_string()),
         };
-        app.set_last_common_migration(mock_conflict.incoming_change.clone());
+        let _ = app.set_last_common_migration(mock_conflict.incoming_change.clone());
         app.create_migration_name_changes(mock_conflict);
 
         // Verify that rebased migrations got renamed and are now in rebased_migrations
@@ -2273,7 +2272,7 @@ class Migration(migrations.Migration):
         fs::write(&max_migration_path, conflict_content)
             .expect("Failed to write max migration file");
 
-        let _result = fix(migrations_dir.to_str().unwrap(), false, true).unwrap();
+        fix(migrations_dir.to_str().unwrap(), false, true).unwrap();
         let mut django_project = DjangoProject::from_path(&migrations_dir, true).unwrap();
         let app = django_project.apps.get_mut("test_app").unwrap();
 

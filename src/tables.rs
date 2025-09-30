@@ -23,7 +23,7 @@ pub fn get_table(options: TableOptions<'_>) -> cli_table::TableStruct {
 }
 
 fn get_summary_table(groups: &HashMap<String, MigrationGroup>) -> cli_table::TableStruct {
-    let table = groups
+    groups
         .values()
         .map(|group| {
             let app_name = group.get_app_name();
@@ -103,15 +103,14 @@ fn get_summary_table(groups: &HashMap<String, MigrationGroup>) -> cli_table::Tab
                 .cell()
                 .bold(true)
                 .foreground_color(Some(Color::Green)),
-        ]);
-    table
+        ])
 }
 
 fn get_migration_changes_table<'a>(
     app_name: &str,
     migrations: impl Iterator<Item = &'a Migration>,
 ) -> cli_table::TableStruct {
-    let table = migrations
+    migrations
         .filter(|migration| {
             migration.name_change.is_some() || migration.dependency_change.is_some()
         })
@@ -163,14 +162,13 @@ fn get_migration_changes_table<'a>(
                 .cell()
                 .bold(true)
                 .foreground_color(Some(Color::Magenta)),
-        ]);
-    table
+        ])
 }
 
 fn get_max_migration_changes_table(
     groups: &HashMap<String, MigrationGroup>,
 ) -> cli_table::TableStruct {
-    let table = groups
+    groups
         .values()
         .filter_map(|group| {
             if let MaxMigrationResult::Ok(max_file) = &group.max_migration_result {
@@ -208,6 +206,5 @@ fn get_max_migration_changes_table(
                 .cell()
                 .bold(true)
                 .foreground_color(Some(Color::Green)),
-        ]);
-    table
+        ])
 }
