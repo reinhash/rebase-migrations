@@ -67,8 +67,8 @@ const SKIP_DIRECTORIES: &[&str] = &[
 ];
 
 #[derive(Debug)]
-pub struct DjangoProject {
-    pub apps: HashMap<String, MigrationGroup>,
+struct DjangoProject {
+    apps: HashMap<String, MigrationGroup>,
 }
 
 impl DjangoProject {
@@ -241,7 +241,7 @@ pub struct MigrationParser {
 }
 
 impl MigrationParser {
-    pub fn new(python_path: &PathBuf) -> Result<Self, String> {
+    fn new(python_path: &PathBuf) -> Result<Self, String> {
         let python_source = std::fs::read_to_string(python_path)
             .map_err(|e| format!("Failed to read file {}: {}", python_path.display(), e))?;
 
@@ -318,7 +318,7 @@ impl MigrationParser {
         }
     }
 
-    pub fn get_dependencies(&self) -> Vec<MigrationDependency> {
+    fn get_dependencies(&self) -> Vec<MigrationDependency> {
         let empty_vec: Vec<MigrationDependency> = Vec::new();
         let migration_class = match self.find_migration_class() {
             Ok(class) => class,
@@ -543,7 +543,7 @@ impl Display for MigrationDependencyChange {
 }
 
 #[derive(Debug)]
-pub struct MigrationDependencyIterator {
+struct MigrationDependencyIterator {
     migration_stack: Vec<Migration>,
     visited: HashSet<String>,
 }
@@ -582,7 +582,7 @@ impl Iterator for MigrationDependencyIterator {
 }
 
 impl MigrationDependencyIterator {
-    pub fn new(initial_migration: Migration) -> Self {
+    fn new(initial_migration: Migration) -> Self {
         let mut migration_stack = Vec::new();
         migration_stack.push(initial_migration);
 
@@ -619,7 +619,7 @@ impl MigrationDependencyIterator {
 }
 
 #[derive(Debug)]
-pub struct MigrationIterator {
+struct MigrationIterator {
     dependency_iterator: MigrationDependencyIterator,
 }
 
@@ -634,10 +634,10 @@ impl Iterator for MigrationIterator {
 #[derive(Debug, Clone)]
 pub struct Migration {
     pub file_name: MigrationFileName,
-    pub file_path: PathBuf,
-    pub app_name: String,
-    pub dependencies: Vec<MigrationDependency>,
-    pub from_rebased_branch: bool,
+    file_path: PathBuf,
+    app_name: String,
+    dependencies: Vec<MigrationDependency>,
+    from_rebased_branch: bool,
     pub name_change: Option<MigrationFileNameChange>,
     pub dependency_change: Option<MigrationDependencyChange>,
 }
@@ -677,7 +677,7 @@ impl TryFrom<PathBuf> for Migration {
 }
 
 impl Migration {
-    pub fn iter(&self) -> MigrationIterator {
+    fn iter(&self) -> MigrationIterator {
         MigrationIterator {
             dependency_iterator: MigrationDependencyIterator::new(self.clone()),
         }

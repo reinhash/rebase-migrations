@@ -8,12 +8,12 @@ mod utils;
 #[pyfunction]
 #[pyo3(signature = (path, dry_run=false, all_dirs=false))]
 /// Fix Django migration conflicts during git rebase.
-/// 
+///
 /// Args:
 ///     path: Path to the Django project directory
 ///     dry_run: If True, preview changes without applying them (default: False)
 ///     all_dirs: If True, scan all directories for performance (default: False)
-/// 
+///
 /// Raises:
 ///     RuntimeError: If the migration rebase operation fails
 fn run_rebase(path: &str, dry_run: bool, all_dirs: bool) -> PyResult<()> {

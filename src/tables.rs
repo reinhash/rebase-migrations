@@ -1,4 +1,4 @@
-use crate::rebase::{Migration, MigrationGroup, MaxMigrationResult};
+use crate::rebase::{MaxMigrationResult, Migration, MigrationGroup};
 use cli_table::{Cell, Color, Style, Table};
 use std::collections::HashMap;
 
@@ -12,7 +12,10 @@ pub fn get_table(options: TableOptions<'_>) -> cli_table::TableStruct {
     match options {
         TableOptions::Summary(groups) => get_summary_table(groups),
         TableOptions::MigrationChanges(app_name, group) => {
-            let combined_migrations = group.migrations.values().chain(group.rebased_migrations.iter());
+            let combined_migrations = group
+                .migrations
+                .values()
+                .chain(group.rebased_migrations.iter());
             get_migration_changes_table(app_name, combined_migrations)
         }
         TableOptions::MaxMigrationChanges(groups) => get_max_migration_changes_table(groups),
@@ -48,15 +51,16 @@ fn get_summary_table(groups: &HashMap<String, MigrationGroup>) -> cli_table::Tab
                     .filter(|m| m.dependency_change.is_some())
                     .count();
 
-            let max_migration_update = if let MaxMigrationResult::Ok(max_file) = &group.max_migration_result {
-                if max_file.new_content.is_some() {
-                    "Yes"
+            let max_migration_update =
+                if let MaxMigrationResult::Ok(max_file) = &group.max_migration_result {
+                    if max_file.new_content.is_some() {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
                 } else {
                     "No"
-                }
-            } else {
-                "No"
-            };
+                };
 
             vec![
                 app_name.cell().bold(true),
