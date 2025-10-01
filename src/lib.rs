@@ -1,7 +1,7 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
-mod rebase;
+mod migration;
 mod tables;
 mod utils;
 
@@ -17,7 +17,7 @@ mod utils;
 /// Raises:
 ///     RuntimeError: If the migration rebase operation fails
 fn run_rebase(path: &str, dry_run: bool, all_dirs: bool) -> PyResult<()> {
-    rebase::fix(path, dry_run, all_dirs).map_err(PyErr::new::<PyRuntimeError, _>)
+    migration::project::fix(path, dry_run, all_dirs).map_err(PyErr::new::<PyRuntimeError, _>)
 }
 
 /// A Python module implemented in Rust. The name of this function must match

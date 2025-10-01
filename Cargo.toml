@@ -30,6 +30,7 @@ features = ["abi3-py38"]
 [[bin]]
 name = "rebase-migrations"
 path = "src/main.rs"
+test = false
 
 [lib]
 name = "rebase_migrations"

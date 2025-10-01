@@ -1,4 +1,5 @@
-use crate::rebase::{MaxMigrationResult, Migration, MigrationGroup};
+use crate::migration::file::{MaxMigrationResult, Migration};
+use crate::migration::group::MigrationGroup;
 use cli_table::{Cell, Color, Style, Table};
 use std::collections::HashMap;
 
