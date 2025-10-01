@@ -66,6 +66,9 @@ const SKIP_DIRECTORIES: &[&str] = &[
     "docs",
 ];
 
+const MIGRATIONS: &str = "migrations";
+const MAX_MIGRATION_TXT: &str = "max_migration.txt";
+
 #[derive(Debug)]
 struct DjangoProject {
     apps: HashMap<String, MigrationGroup>,
@@ -98,7 +101,12 @@ impl DjangoProject {
         for entry in walkdir_iter.filter_map(|e| e.ok()) {
             let path = entry.path();
 
-            if path.is_dir() && path.file_name() == Some(std::ffi::OsStr::new("migrations")) {
+            if path.is_dir() && path.file_name() == Some(std::ffi::OsStr::new(MIGRATIONS)) {
+                let max_migration_path = path.join(MAX_MIGRATION_TXT);
+                if !max_migration_path.exists() {
+                    continue;
+                }
+
                 let app_path = path.parent().ok_or_else(|| {
                     format!(
                         "Invalid app directory for migrations folder: {}",
@@ -749,7 +757,7 @@ impl MaxMigrationFile {
     /// Returns an error if the file write operation fails.
     fn apply_change(&self, migrations_dir: &Path) -> Result<(), String> {
         if let Some(new_content) = &self.new_content {
-            let max_migration_path = migrations_dir.join("max_migration").with_extension("txt");
+            let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
             let content = format!("{}\n", new_content.0);
             std::fs::write(&max_migration_path, content)
                 .map_err(|e| format!("Failed to write max migration file: {e}"))?;
@@ -1026,7 +1034,7 @@ impl MigrationGroup {
 
 impl MigrationGroup {
     fn create(app_path: &Path) -> Result<Self, String> {
-        let directory = app_path.join("migrations");
+        let directory = app_path.join(MIGRATIONS);
 
         // 1. open max migration file
         // 2. check for conflict
@@ -1062,7 +1070,7 @@ impl MigrationGroup {
     }
 
     fn load_max_migration_file(directory: &Path) -> MaxMigrationResult {
-        let max_migration_path = directory.join("max_migration.txt");
+        let max_migration_path = directory.join(MAX_MIGRATION_TXT);
         if !max_migration_path.exists() {
             return MaxMigrationResult::None;
         }
@@ -1121,14 +1129,14 @@ mod tests {
     fn setup_test_env() -> (TempDir, PathBuf) {
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let app_dir = temp_dir.path().join("test_app");
-        let migrations_dir = app_dir.join("migrations");
+        let migrations_dir = app_dir.join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
         (temp_dir, migrations_dir)
     }
 
     /// Helper function to create a max_migration.txt file
     fn create_max_migration_file(migrations_dir: &Path, migration_name: &str) {
-        let max_migration_path = migrations_dir.join("max_migration.txt");
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
         fs::write(&max_migration_path, format!("{}\n", migration_name))
             .expect("Failed to write max migration file");
     }
@@ -1218,18 +1226,18 @@ class Migration(migrations.Migration):
 
         // Create app_a with one migration
         let app_a_dir = project_path.join("app_a");
-        let migrations_a_dir = app_a_dir.join("migrations");
+        let migrations_a_dir = app_a_dir.join(MIGRATIONS);
         fs::create_dir_all(&migrations_a_dir).expect("Failed to create migrations directory");
         create_test_migration_file(&migrations_a_dir, 1, "initial", vec![]);
 
         // Create max_migration.txt for app_a
-        let max_migration_a_path = migrations_a_dir.join("max_migration.txt");
+        let max_migration_a_path = migrations_a_dir.join(MAX_MIGRATION_TXT);
         fs::write(&max_migration_a_path, "0001_initial\n")
             .expect("Failed to write max migration file");
 
         // Create app_b with a migration that depends on app_a
         let app_b_dir = project_path.join("app_b");
-        let migrations_b_dir = app_b_dir.join("migrations");
+        let migrations_b_dir = app_b_dir.join(MIGRATIONS);
         fs::create_dir_all(&migrations_b_dir).expect("Failed to create migrations directory");
         create_test_migration_file(
             &migrations_b_dir,
@@ -1239,7 +1247,7 @@ class Migration(migrations.Migration):
         );
 
         // Create max_migration.txt for app_b
-        let max_migration_b_path = migrations_b_dir.join("max_migration.txt");
+        let max_migration_b_path = migrations_b_dir.join(MAX_MIGRATION_TXT);
         fs::write(&max_migration_b_path, "0001_depend_on_a\n")
             .expect("Failed to write max migration file");
 
@@ -1299,7 +1307,7 @@ class Migration(migrations.Migration):
 
         // Create app with migrations
         let app_dir = project_path.join("myapp");
-        let migrations_dir = app_dir.join("migrations");
+        let migrations_dir = app_dir.join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
         create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
         create_test_migration_file(
@@ -1310,7 +1318,7 @@ class Migration(migrations.Migration):
         );
 
         // Create max_migration.txt file
-        let max_migration_path = migrations_dir.join("max_migration.txt");
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
         fs::write(&max_migration_path, "0002_add_field\n")
             .expect("Failed to write max migration file");
 
@@ -1717,7 +1725,7 @@ class NotAMigration:
     #[test]
     fn test_migration_filename_change_apply_change() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let migrations_dir = temp_dir.path().join("migrations");
+        let migrations_dir = temp_dir.path().join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
 
         // Create a test migration file
@@ -1751,7 +1759,7 @@ class NotAMigration:
     #[test]
     fn test_migration_filename_change_apply_change_nonexistent_file() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let migrations_dir = temp_dir.path().join("migrations");
+        let migrations_dir = temp_dir.path().join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
 
         // Create a MigrationFileNameChange for a non-existent file
@@ -1769,7 +1777,7 @@ class NotAMigration:
     #[test]
     fn test_migration_dependency_change_apply_change() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let migrations_dir = temp_dir.path().join("migrations");
+        let migrations_dir = temp_dir.path().join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
 
         // Create a test migration file with dependencies
@@ -1837,7 +1845,7 @@ class Migration(migrations.Migration):
     #[test]
     fn test_migration_dependency_change_apply_change_empty_dependencies() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let migrations_dir = temp_dir.path().join("migrations");
+        let migrations_dir = temp_dir.path().join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
 
         // Create a migration file with empty dependencies
@@ -1875,7 +1883,7 @@ class Migration(migrations.Migration):
     #[test]
     fn test_migration_dependency_change_apply_change_nonexistent_file() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let migrations_dir = temp_dir.path().join("migrations");
+        let migrations_dir = temp_dir.path().join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
 
         let migration_file = migrations_dir.join("nonexistent.py");
@@ -1890,7 +1898,7 @@ class Migration(migrations.Migration):
     #[test]
     fn test_max_migration_file_apply_change() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let migrations_dir = temp_dir.path().join("migrations");
+        let migrations_dir = temp_dir.path().join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
 
         // Create a MaxMigrationFile with new content
@@ -1904,7 +1912,7 @@ class Migration(migrations.Migration):
         assert!(result.is_ok());
 
         // Verify the max_migration.txt file was created with correct content
-        let max_migration_path = migrations_dir.join("max_migration.txt");
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
         assert!(max_migration_path.exists());
 
         let content =
@@ -1915,11 +1923,11 @@ class Migration(migrations.Migration):
     #[test]
     fn test_max_migration_file_apply_change_overwrite_existing() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let migrations_dir = temp_dir.path().join("migrations");
+        let migrations_dir = temp_dir.path().join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
 
         // Create an existing max_migration.txt file
-        let max_migration_path = migrations_dir.join("max_migration.txt");
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
         fs::write(&max_migration_path, "0003_old_content\n")
             .expect("Failed to create existing max migration file");
 
@@ -1942,7 +1950,7 @@ class Migration(migrations.Migration):
     #[test]
     fn test_max_migration_file_apply_change_no_new_content() {
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let migrations_dir = temp_dir.path().join("migrations");
+        let migrations_dir = temp_dir.path().join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
 
         // Create a MaxMigrationFile without new content
@@ -1956,7 +1964,7 @@ class Migration(migrations.Migration):
         assert!(result.is_ok());
 
         // Verify no file was created
-        let max_migration_path = migrations_dir.join("max_migration.txt");
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
         assert!(!max_migration_path.exists());
     }
 
@@ -2018,7 +2026,7 @@ class Migration(migrations.Migration):
         );
 
         // Create max_migration.txt file
-        let max_migration_path = migrations_dir.join("max_migration.txt");
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
         fs::write(&max_migration_path, "0004_update_model\n")
             .expect("Failed to write max migration file");
 
@@ -2158,7 +2166,7 @@ class Migration(migrations.Migration):
 
         // Create app_a with migration
         let app_a_dir = project_path.join("app_a");
-        let migrations_a_dir = app_a_dir.join("migrations");
+        let migrations_a_dir = app_a_dir.join(MIGRATIONS);
         fs::create_dir_all(&migrations_a_dir).expect("Failed to create migrations directory");
         create_test_migration_file(&migrations_a_dir, 1, "initial", vec![]);
 
@@ -2167,7 +2175,7 @@ class Migration(migrations.Migration):
 
         // Create app_b with migration that depends on app_a
         let app_b_dir = project_path.join("app_b");
-        let migrations_b_dir = app_b_dir.join("migrations");
+        let migrations_b_dir = app_b_dir.join(MIGRATIONS);
         fs::create_dir_all(&migrations_b_dir).expect("Failed to create migrations directory");
         create_test_migration_file(
             &migrations_b_dir,
@@ -2263,7 +2271,7 @@ class Migration(migrations.Migration):
             vec![("test_app", "'0003_merge_migration_for_number_2'")],
         );
 
-        let max_migration_path = migrations_dir.join("max_migration.txt");
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
         let conflict_content = r#"<<<<<<< HEAD
 0004_regular_migration.py
 =======
@@ -2332,7 +2340,7 @@ class Migration(migrations.Migration):
         );
 
         // Check that max_migration.txt was updated to point to the highest migration
-        let max_migration_path = migrations_dir.join("max_migration.txt");
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
         let max_migration_content =
             fs::read_to_string(&max_migration_path).expect("max_migration.txt should exist");
         assert_eq!(max_migration_content.trim(), "0005_to_be_rebased_migration");
@@ -2456,7 +2464,7 @@ class Migration(migrations.Migration):
         );
 
         // Create max_migration.txt showing conflict between HEAD merge migrations and rebased
-        let max_migration_path = migrations_dir.join("max_migration.txt");
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
         let conflict_content = r#"<<<<<<< HEAD
 0009_branch_a_merge.py
 =======
