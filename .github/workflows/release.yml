@@ -54,7 +54,7 @@ jobs:
         with:
           use-cross: true
           command: build
-          args: --verbose --release --target ${{ matrix.target }}
+          args: --bin rebase-migrations --verbose --release --target ${{ matrix.target }}
 
       - name: Build archive
         shell: bash
