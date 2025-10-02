@@ -12,7 +12,7 @@ use crate::migration::file::{
 
 #[derive(Debug)]
 pub struct MigrationGroup {
-    pub migrations: HashMap<PathBuf, Migration>,
+    pub head_migrations: HashMap<PathBuf, Migration>,
     pub directory: PathBuf,
     pub last_common_migration: Option<MigrationFileName>,
     pub max_migration_result: MaxMigrationResult,
@@ -48,10 +48,13 @@ impl MigrationGroup {
         // - if the migration has the dependency of self.last_common_migration it needs to be set to the last head migration
         // - for all other rebased migrations, set their dependencies based on the lookup
         let app_name = self.get_app_name().to_string();
-        let head_migration = self.find_highest_migration(true).cloned();
+        let head_migration = self
+            .find_highest_migration(true)
+            .cloned()
+            .expect("We must have a head migration here");
 
         // Combine both migration collections for processing
-        let mut all_migrations: Vec<&mut Migration> = self.migrations.values_mut().collect();
+        let mut all_migrations: Vec<&mut Migration> = self.head_migrations.values_mut().collect();
         all_migrations.extend(self.rebased_migrations.iter_mut());
 
         for migration in all_migrations {
@@ -67,11 +70,7 @@ impl MigrationGroup {
                             if dependency.migration_file == *common_migration {
                                 updated_dependencies[i] = MigrationDependency {
                                     app: app_name.clone(),
-                                    migration_file: head_migration
-                                        .as_ref()
-                                        .expect("We must have a head migration here")
-                                        .file_name
-                                        .clone(),
+                                    migration_file: head_migration.file_name.clone(),
                                 };
                                 has_changes = true;
                                 continue;
@@ -137,13 +136,9 @@ impl MigrationGroup {
         if self.last_common_migration.is_none() {
             return;
         }
-        // Find the highest migration number from head (non-rebased) migrations
         let highest_head_number = self
-            .migrations
-            .values()
-            .map(|m| m.file_name.number())
-            .max()
-            .unwrap();
+            .find_highest_migration_number(true)
+            .expect("we must have migrations at this stage");
 
         let last_incoming_migration = Migration::try_from(
             self.directory
@@ -200,7 +195,7 @@ impl MigrationGroup {
             .with_extension("py");
         let rebased_migration = Migration::try_from(rebased_migration_path).unwrap();
         for migration in rebased_migration.iter() {
-            if self.migrations.contains_key(&migration.file_path) {
+            if self.head_migrations.contains_key(&migration.file_path) {
                 self.last_common_migration = Some(migration.file_name);
                 break;
             }
@@ -217,15 +212,8 @@ impl MigrationGroup {
     ///
     /// Returns `None` if no migrations are found that match the filtering criteria.
     fn find_highest_migration_number(&self, head_only: bool) -> Option<u32> {
-        if head_only {
-            return self
-                .migrations
-                .values()
-                .filter(|m| !m.from_rebased_branch)
-                .map(|m| m.file_name.number())
-                .max();
-        }
-        self.migrations.values().map(|m| m.file_name.number()).max()
+        let migration = self.find_highest_migration(head_only).ok()?;
+        Some(migration.file_name.number())
     }
 
     /// Finds the single migration with the highest number in this group.
@@ -238,39 +226,50 @@ impl MigrationGroup {
     ///
     /// Returns the migration with the highest number, ensuring there is exactly one
     /// migration with that number.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - No migrations are found that match the filtering criteria
-    /// - Multiple migrations exist with the same highest number (indicates corruption)
     fn find_highest_migration(&self, head_only: bool) -> Result<&Migration, String> {
-        // return an Error if there is more than one migration with the highest number.
-        // Otherwise there should only be one migration. Return it.
-        let highest_number = self
-            .find_highest_migration_number(head_only)
-            .ok_or_else(|| "No migrations found".to_string())?;
-        let migrations_with_highest_number: Vec<&Migration> = self
-            .migrations
-            .values()
-            .filter(|m| m.file_name.number() == highest_number)
-            .collect();
-        if migrations_with_highest_number.len() > 1 {
-            if head_only {
-                let head_migrations: Vec<&Migration> = migrations_with_highest_number
-                    .into_iter()
-                    .filter(|m| !m.from_rebased_branch)
-                    .collect();
-                if head_migrations.len() == 1 {
-                    return Ok(head_migrations.into_iter().next().unwrap());
+        match &self.max_migration_result {
+            MaxMigrationResult::Conflict(merge_conflict) => {
+                if head_only {
+                    // Return the head migration from the conflict
+                    self.head_migrations
+                        .values()
+                        .find(|m| m.file_name == merge_conflict.head)
+                        .ok_or_else(|| {
+                            format!("Head migration {} not found in head_migrations", merge_conflict.head)
+                        })
+                } else {
+                    // Return the rebased migration from the conflict
+                    self.rebased_migrations
+                        .iter()
+                        .find(|m| m.file_name == merge_conflict.incoming_change)
+                        .ok_or_else(|| {
+                            format!("Rebased migration {} not found in rebased_migrations", merge_conflict.incoming_change)
+                        })
                 }
             }
-            Err(format!(
-                "Multiple migrations found with the highest number: {}",
-                highest_number
-            ))
-        } else {
-            Ok(migrations_with_highest_number.into_iter().next().unwrap())
+            MaxMigrationResult::Ok(max_migration_file) => {
+                // Find the migration matching the max_migration.txt content
+                if head_only {
+                    self.head_migrations
+                        .values()
+                        .find(|m| m.file_name == max_migration_file.current_content)
+                        .ok_or_else(|| {
+                            format!("Migration {} not found in head_migrations", max_migration_file.current_content)
+                        })
+                } else {
+                    // Check both head and rebased migrations
+                    self.head_migrations
+                        .values()
+                        .chain(self.rebased_migrations.iter())
+                        .find(|m| m.file_name == max_migration_file.current_content)
+                        .ok_or_else(|| {
+                            format!("Migration {} not found", max_migration_file.current_content)
+                        })
+                }
+            }
+            MaxMigrationResult::None => Err(
+                "Could not find the highest migration since there is no clear indication in the max_migration.txt for this app.".into(),
+            ),
         }
     }
 
@@ -314,7 +313,7 @@ impl MigrationGroup {
             migrations.insert(migration.file_path.clone(), migration);
         }
         Ok(Self {
-            migrations,
+            head_migrations: migrations,
             directory,
             last_common_migration: None,
             max_migration_result,
@@ -401,7 +400,7 @@ mod tests {
         let app = project.apps.get_mut("test_app").unwrap();
 
         // Mark migrations 3 and 4 as from rebased branch
-        for (path, migration) in app.migrations.iter_mut() {
+        for (path, migration) in app.head_migrations.iter_mut() {
             let filename = path.file_name().unwrap().to_str().unwrap();
             if filename == "0003_rebased_remove_field.py"
                 || filename == "0004_rebased_update_model.py"
@@ -466,13 +465,13 @@ mod tests {
 
         // Set up scenario: migration 0001 gets renamed and 0002 is from rebased branch
         let migration_0001_path = app
-            .migrations
+            .head_migrations
             .keys()
             .find(|path| path.file_name().unwrap().to_str().unwrap() == "0001_initial.py")
             .cloned()
             .unwrap();
 
-        if let Some(migration) = app.migrations.get_mut(&migration_0001_path) {
+        if let Some(migration) = app.head_migrations.get_mut(&migration_0001_path) {
             migration.name_change = Some(MigrationFileNameChange::new(
                 MigrationFileName("0001_initial".to_string()),
                 MigrationFileName("0003_initial".to_string()),
@@ -481,13 +480,13 @@ mod tests {
 
         // Mark migration 0002 as from rebased branch
         let migration_0002_path = app
-            .migrations
+            .head_migrations
             .keys()
             .find(|path| path.file_name().unwrap().to_str().unwrap() == "0002_add_field.py")
             .cloned()
             .unwrap();
 
-        if let Some(migration) = app.migrations.get_mut(&migration_0002_path) {
+        if let Some(migration) = app.head_migrations.get_mut(&migration_0002_path) {
             migration.from_rebased_branch = true;
         }
 
@@ -505,7 +504,7 @@ mod tests {
         app.create_migration_dependency_changes(true, &lookup);
 
         // Verify that migration 0002 has its dependency updated
-        let migration_0002 = app.migrations.get(&migration_0002_path).unwrap();
+        let migration_0002 = app.head_migrations.get(&migration_0002_path).unwrap();
         assert!(migration_0002.dependency_change.is_some());
 
         let dep_change = migration_0002.dependency_change.as_ref().unwrap();
@@ -570,7 +569,7 @@ mod tests {
 
         // Verify that app_b's migration has its dependency updated
         let migration_b = app_b
-            .migrations
+            .head_migrations
             .values()
             .find(|m| m.file_name.0 == "0001_depend_on_a")
             .unwrap();

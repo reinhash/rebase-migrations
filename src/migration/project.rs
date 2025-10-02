@@ -164,7 +164,7 @@ impl DjangoProject {
         for group in self.apps.values() {
             let app_name = group.get_app_name().to_string();
             let mut changes: Vec<MigrationFileNameChange> = group
-                .migrations
+                .head_migrations
                 .values()
                 .filter_map(|m| m.name_change.clone())
                 .collect();
@@ -190,7 +190,7 @@ impl DjangoProject {
 
             // Combine both migration collections for applying changes
             let all_migrations: Vec<&Migration> = group
-                .migrations
+                .head_migrations
                 .values()
                 .chain(group.rebased_migrations.iter())
                 .collect();
@@ -225,7 +225,7 @@ impl DjangoProject {
         );
         for group in self.apps.values() {
             let has_migration_changes = group
-                .migrations
+                .head_migrations
                 .values()
                 .any(|m| m.name_change.is_some() || m.dependency_change.is_some())
                 || group
@@ -296,7 +296,7 @@ mod tests {
         assert!(project.apps.contains_key("test_app"));
 
         let app = project.apps.get("test_app").unwrap();
-        assert_eq!(app.migrations.len(), 2);
+        assert_eq!(app.head_migrations.len(), 2);
     }
 
     #[test]
@@ -347,13 +347,13 @@ mod tests {
         // Simulate renaming app_a's migration from 0001_initial to 0005_initial
         let app_a = project.apps.get_mut("app_a").unwrap();
         let migration_path = app_a
-            .migrations
+            .head_migrations
             .keys()
             .find(|path| path.file_name().unwrap().to_str().unwrap() == "0001_initial.py")
             .cloned()
             .unwrap();
 
-        if let Some(migration) = app_a.migrations.get_mut(&migration_path) {
+        if let Some(migration) = app_a.head_migrations.get_mut(&migration_path) {
             migration.name_change = Some(MigrationFileNameChange::new(
                 MigrationFileName("0001_initial".to_string()),
                 MigrationFileName("0005_initial".to_string()),
@@ -366,7 +366,7 @@ mod tests {
         // Verify that app_b's migration dependency was updated
         let app_b = project.apps.get("app_b").unwrap();
         let migration_b = app_b
-            .migrations
+            .head_migrations
             .values()
             .find(|m| m.file_name.0 == "0001_depend_on_a")
             .unwrap();
@@ -420,13 +420,13 @@ mod tests {
 
         // Add file name change
         let migration_path = app
-            .migrations
+            .head_migrations
             .keys()
             .find(|path| path.file_name().unwrap().to_str().unwrap() == "0002_add_field.py")
             .cloned()
             .unwrap();
 
-        if let Some(migration) = app.migrations.get_mut(&migration_path) {
+        if let Some(migration) = app.head_migrations.get_mut(&migration_path) {
             migration.name_change = Some(MigrationFileNameChange::new(
                 MigrationFileName("0002_add_field".to_string()),
                 MigrationFileName("0003_add_field".to_string()),
@@ -524,7 +524,7 @@ mod tests {
         );
 
         // Check the migration object in the app (it should be keyed by the new path)
-        let migration_0005_to_be_rebased = app.migrations.get(&new_migration_path).unwrap();
+        let migration_0005_to_be_rebased = app.head_migrations.get(&new_migration_path).unwrap();
         assert_eq!(migration_0005_to_be_rebased.file_name.number(), 5);
         assert_eq!(
             migration_0005_to_be_rebased.file_name.name(),
@@ -548,7 +548,7 @@ mod tests {
 
         // Verify the regular migration (from HEAD) stays at 0004 and doesn't change
         let migration_0004_regular_path = migrations_dir.join("0004_regular_migration.py");
-        let migration_0004_regular = app.migrations.get(&migration_0004_regular_path).unwrap();
+        let migration_0004_regular = app.head_migrations.get(&migration_0004_regular_path).unwrap();
 
         // The regular migration should not be renamed - it stays at 0004
         assert_eq!(migration_0004_regular.file_name.number(), 4);

@@ -122,6 +122,8 @@ pub struct MergeConflict {
 impl TryFrom<String> for MergeConflict {
     type Error = String;
 
+    /// Find one merge conflict in a file content.
+    /// Currently, only one conflict is supported.
     fn try_from(content: String) -> Result<Self, Self::Error> {
         if content.contains("<<<<<<< HEAD")
             && content.contains("=======")
@@ -560,7 +562,6 @@ mod tests {
 
     #[test]
     fn test_max_migration_file_apply_change() {
-        use crate::migration::test_helpers::*;
         use std::fs;
         use tempfile::tempdir;
 
@@ -589,7 +590,6 @@ mod tests {
 
     #[test]
     fn test_max_migration_file_apply_change_overwrite_existing() {
-        use crate::migration::test_helpers::*;
         use std::fs;
         use tempfile::tempdir;
 
@@ -620,7 +620,6 @@ mod tests {
 
     #[test]
     fn test_max_migration_file_apply_change_no_new_content() {
-        use crate::migration::test_helpers::*;
         use std::fs;
         use tempfile::tempdir;
 

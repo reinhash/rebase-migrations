@@ -14,7 +14,7 @@ pub fn get_table(options: TableOptions<'_>) -> cli_table::TableStruct {
         TableOptions::Summary(groups) => get_summary_table(groups),
         TableOptions::MigrationChanges(app_name, group) => {
             let combined_migrations = group
-                .migrations
+                .head_migrations
                 .values()
                 .chain(group.rebased_migrations.iter());
             get_migration_changes_table(app_name, combined_migrations)
@@ -28,10 +28,10 @@ fn get_summary_table(groups: &HashMap<String, MigrationGroup>) -> cli_table::Tab
         .values()
         .map(|group| {
             let app_name = group.get_app_name();
-            let total_migrations = group.migrations.len() + group.rebased_migrations.len();
+            let total_migrations = group.head_migrations.len() + group.rebased_migrations.len();
 
             let file_renames = group
-                .migrations
+                .head_migrations
                 .values()
                 .filter(|m| m.name_change.is_some())
                 .count()
@@ -42,7 +42,7 @@ fn get_summary_table(groups: &HashMap<String, MigrationGroup>) -> cli_table::Tab
                     .count();
 
             let dependency_updates = group
-                .migrations
+                .head_migrations
                 .values()
                 .filter(|m| m.dependency_change.is_some())
                 .count()
