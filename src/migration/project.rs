@@ -548,7 +548,10 @@ mod tests {
 
         // Verify the regular migration (from HEAD) stays at 0004 and doesn't change
         let migration_0004_regular_path = migrations_dir.join("0004_regular_migration.py");
-        let migration_0004_regular = app.head_migrations.get(&migration_0004_regular_path).unwrap();
+        let migration_0004_regular = app
+            .head_migrations
+            .get(&migration_0004_regular_path)
+            .unwrap();
 
         // The regular migration should not be renamed - it stays at 0004
         assert_eq!(migration_0004_regular.file_name.number(), 4);
@@ -703,5 +706,534 @@ mod tests {
             result.unwrap_err(),
             "Merge migration detected in rebased migration: 0009_branch_b_merge. Currently, merge migrations cannot be resolved properly when they are not part of the HEAD branch. In fact, you can use this tool to avoid merge migrations by rebasing your feature branch on the latest HEAD migration."
         );
+    }
+
+    #[test]
+    fn test_rebase_with_multiple_head_and_feature_migrations() {
+        let (temp_dir, migrations_dir) = setup_test_env();
+        // Create a realistic rebase scenario with multiple migrations on both HEAD and feature branch
+        // Timeline:
+        //
+        // 0001_initial
+        //     │
+        // 0002_add_user_model
+        //     │
+        // 0003_add_profile
+        //     │
+        //     ├─────────────────────┐ (branches diverge)
+        //     │                     │
+        //     │                     │ (feature branch)
+        // 0004_add_posts            0004_add_comments
+        //     │                     0005_add_likes
+        // 0005_add_tags             0006_add_follows
+        //     │
+        // 0006_add_categories
+        //     │ (HEAD)
+        //
+        // Expected after rebase:
+        // - feature migrations should be renumbered to 0007, 0008, 0009
+        // - dependencies on 0003 should remain unchanged
+        // - max_migration.txt should be updated to 0009_add_follows
+
+        // Create shared migrations (1-3)
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_user_model",
+            vec![("test_app", "'0001_initial'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "add_profile",
+            vec![("test_app", "'0002_add_user_model'")],
+        );
+
+        // Create HEAD migrations (4-6)
+        create_test_migration_file(
+            &migrations_dir,
+            4,
+            "add_posts",
+            vec![("test_app", "'0003_add_profile'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            5,
+            "add_tags",
+            vec![("test_app", "'0004_add_posts'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            6,
+            "add_categories",
+            vec![("test_app", "'0005_add_tags'")],
+        );
+
+        // Create feature branch migrations (4-6) - these will be rebased
+        create_test_migration_file(
+            &migrations_dir,
+            4,
+            "add_comments",
+            vec![("test_app", "'0003_add_profile'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            5,
+            "add_likes",
+            vec![("test_app", "'0004_add_comments'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            6,
+            "add_follows",
+            vec![("test_app", "'0005_add_likes'")],
+        );
+
+        // Create max_migration.txt showing conflict
+        let max_migration_path = migrations_dir.join("max_migration.txt");
+        let conflict_content = r#"<<<<<<< HEAD
+0006_add_categories
+=======
+0006_add_follows
+>>>>>>> feature-branch"#;
+        fs::write(&max_migration_path, conflict_content)
+            .expect("Failed to write max migration file");
+
+        // Run the fix
+        let result = fix(temp_dir.path().to_str().unwrap(), false, true);
+        assert!(result.is_ok(), "Fix should succeed: {:?}", result.err());
+
+        // Verify the migrations were renumbered correctly
+        assert!(
+            !migrations_dir.join("0004_add_comments.py").exists(),
+            "Old 0004_add_comments should not exist"
+        );
+        assert!(
+            !migrations_dir.join("0005_add_likes.py").exists(),
+            "Old 0005_add_likes should not exist"
+        );
+        assert!(
+            !migrations_dir.join("0006_add_follows.py").exists(),
+            "Old 0006_add_follows should not exist"
+        );
+
+        assert!(
+            migrations_dir.join("0007_add_comments.py").exists(),
+            "New 0007_add_comments should exist"
+        );
+        assert!(
+            migrations_dir.join("0008_add_likes.py").exists(),
+            "New 0008_add_likes should exist"
+        );
+        assert!(
+            migrations_dir.join("0009_add_follows.py").exists(),
+            "New 0009_add_follows should exist"
+        );
+
+        // Verify HEAD migrations are unchanged
+        assert!(
+            migrations_dir.join("0004_add_posts.py").exists(),
+            "HEAD migration 0004_add_posts should remain"
+        );
+        assert!(
+            migrations_dir.join("0005_add_tags.py").exists(),
+            "HEAD migration 0005_add_tags should remain"
+        );
+        assert!(
+            migrations_dir.join("0006_add_categories.py").exists(),
+            "HEAD migration 0006_add_categories should remain"
+        );
+
+        // Verify dependency updates in rebased migrations
+        let comments_content = fs::read_to_string(migrations_dir.join("0007_add_comments.py"))
+            .expect("Failed to read 0007_add_comments.py");
+        assert!(
+            comments_content.contains("'0006_add_categories'"),
+            "0007_add_comments should depend on 0006_add_categories (last HEAD migration)"
+        );
+
+        let likes_content = fs::read_to_string(migrations_dir.join("0008_add_likes.py"))
+            .expect("Failed to read 0008_add_likes.py");
+        assert!(
+            likes_content.contains("'0007_add_comments'"),
+            "0008_add_likes should depend on 0007_add_comments"
+        );
+
+        let follows_content = fs::read_to_string(migrations_dir.join("0009_add_follows.py"))
+            .expect("Failed to read 0009_add_follows.py");
+        assert!(
+            follows_content.contains("'0008_add_likes'"),
+            "0009_add_follows should depend on 0008_add_likes"
+        );
+
+        // Verify max_migration.txt was updated
+        let max_migration_content =
+            fs::read_to_string(&max_migration_path).expect("Failed to read max_migration.txt");
+        assert_eq!(
+            max_migration_content.trim(),
+            "0009_add_follows",
+            "max_migration.txt should be updated to highest rebased migration"
+        );
+    }
+
+    #[test]
+    fn test_rebase_with_cross_app_dependencies() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let project_path = temp_dir.path();
+
+        // Create a scenario with two apps where app_b depends on app_a migrations
+        // Timeline:
+        //
+        // app_a:                      app_b:
+        // 0001_initial                0001_initial
+        //     │                           │
+        // 0002_add_model                  │
+        //     │                           │
+        //     ├───────────────┐           ├───────────────┐
+        //     │               │           │               │
+        // 0003_add_field      │       0002_link_to_a      │
+        //     │ (HEAD)        │       (depends on         │
+        //                     │        app_a:0002)        │
+        //                     │           │ (HEAD)        │
+        //                     │                           │
+        //           0003_update_model         0002_feature_b
+        //           (feature branch)          (depends on app_a:0003
+        //                                      and app_b:0001)
+        //                                      (feature branch)
+        //
+        // Expected after rebase:
+        // - app_a:0003_update_model → app_a:0004_update_model
+        // - app_b:0002_feature_b → app_b:0003_feature_b
+        // - app_b:0003_feature_b should depend on app_a:0004_update_model
+
+        // Set up app_a
+        let app_a_dir = project_path.join("app_a");
+        let migrations_a_dir = app_a_dir.join(MIGRATIONS);
+        fs::create_dir_all(&migrations_a_dir).expect("Failed to create app_a migrations");
+
+        create_test_migration_file(&migrations_a_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_a_dir,
+            2,
+            "add_model",
+            vec![("app_a", "'0001_initial'")],
+        );
+        create_test_migration_file(
+            &migrations_a_dir,
+            3,
+            "add_field",
+            vec![("app_a", "'0002_add_model'")],
+        );
+        create_test_migration_file(
+            &migrations_a_dir,
+            3,
+            "update_model",
+            vec![("app_a", "'0002_add_model'")],
+        );
+
+        let max_migration_a_path = migrations_a_dir.join("max_migration.txt");
+        let conflict_a = r#"<<<<<<< HEAD
+0003_add_field
+=======
+0003_update_model
+>>>>>>> feature-branch"#;
+        fs::write(&max_migration_a_path, conflict_a)
+            .expect("Failed to write app_a max_migration.txt");
+
+        // Set up app_b
+        let app_b_dir = project_path.join("app_b");
+        let migrations_b_dir = app_b_dir.join(MIGRATIONS);
+        fs::create_dir_all(&migrations_b_dir).expect("Failed to create app_b migrations");
+
+        create_test_migration_file(&migrations_b_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_b_dir,
+            2,
+            "link_to_a",
+            vec![("app_b", "'0001_initial'"), ("app_a", "'0002_add_model'")],
+        );
+        create_test_migration_file(
+            &migrations_b_dir,
+            2,
+            "feature_b",
+            vec![
+                ("app_b", "'0001_initial'"),
+                ("app_a", "'0003_update_model'"),
+            ],
+        );
+
+        let max_migration_b_path = migrations_b_dir.join("max_migration.txt");
+        let conflict_b = r#"<<<<<<< HEAD
+0002_link_to_a
+=======
+0002_feature_b
+>>>>>>> feature-branch"#;
+        fs::write(&max_migration_b_path, conflict_b)
+            .expect("Failed to write app_b max_migration.txt");
+
+        // Run the fix
+        let result = fix(project_path.to_str().unwrap(), false, true);
+        assert!(result.is_ok(), "Fix should succeed: {:?}", result.err());
+
+        // Verify app_a migrations were renumbered
+        assert!(
+            migrations_a_dir.join("0004_update_model.py").exists(),
+            "app_a:0003_update_model should be renumbered to 0004"
+        );
+        assert!(
+            !migrations_a_dir.join("0003_update_model.py").exists(),
+            "app_a:0003_update_model should not exist anymore"
+        );
+
+        // Verify app_b migrations were renumbered
+        assert!(
+            migrations_b_dir.join("0003_feature_b.py").exists(),
+            "app_b:0002_feature_b should be renumbered to 0003"
+        );
+        assert!(
+            !migrations_b_dir.join("0002_feature_b.py").exists(),
+            "app_b:0002_feature_b should not exist anymore"
+        );
+
+        // Verify cross-app dependency was updated in app_b
+        let feature_b_content = fs::read_to_string(migrations_b_dir.join("0003_feature_b.py"))
+            .expect("Failed to read 0003_feature_b.py");
+        assert!(
+            feature_b_content.contains("('app_a', '0004_update_model')"),
+            "app_b:0003_feature_b should depend on app_a:0004_update_model, got:\n{}",
+            feature_b_content
+        );
+        assert!(
+            feature_b_content.contains("('app_b', '0002_link_to_a')"),
+            "app_b:0003_feature_b should depend on app_b:0002_link_to_a (last HEAD migration)"
+        );
+
+        // Verify max_migration.txt files were updated
+        let max_a_content = fs::read_to_string(&max_migration_a_path)
+            .expect("Failed to read app_a max_migration.txt");
+        assert_eq!(max_a_content.trim(), "0004_update_model");
+
+        let max_b_content = fs::read_to_string(&max_migration_b_path)
+            .expect("Failed to read app_b max_migration.txt");
+        assert_eq!(max_b_content.trim(), "0003_feature_b");
+    }
+
+    #[test]
+    fn test_rebase_single_head_multiple_rebased_with_cross_app() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let project_path = temp_dir.path();
+
+        // Create a scenario where one app has 1 HEAD + 3 rebased migrations,
+        // while another app has 2 HEAD + 1 rebased with bidirectional cross-app dependencies
+        // Timeline:
+        //
+        // app_users:                       app_posts:
+        // 0001_initial                     0001_initial
+        //     │                                │
+        //     ├──────────────┐             0002_add_post_model
+        //     │              │                 │
+        // 0002_add_field     │                 ├──────────────┐
+        //     │ (HEAD)       │                 │              │
+        //                    │             0003_add_likes     │
+        //          0002_add_profile ◄──────┐   │ (HEAD)       │
+        //          (depends on             |                  │
+        //           users:0001)            |       0003_add_comments
+        //                    │             |       (depends on
+        //          0003_add_settings       └────── users:0002_add_profile
+        //          (depends on                      and posts:0002)
+        //           users:0002_add_profile)         (rebased)
+        //                    │
+        //          0004_add_preferences
+        //          (depends on
+        //           users:0003_add_settings
+        //           and posts:0003_add_comments)
+        //          (rebased)
+        //
+        // Expected after rebase:
+        // - app_users: 0002_add_profile → 0003_add_profile
+        //              0003_add_settings → 0004_add_settings
+        //              0004_add_preferences → 0005_add_preferences
+        // - app_posts: 0003_add_comments → 0004_add_comments
+        // - app_posts:0004_add_comments should depend on app_users:0003_add_profile
+        // - app_users:0005_add_preferences should depend on app_posts:0004_add_comments (bidirectional!)
+
+        // Set up app_users
+        let app_users_dir = project_path.join("app_users");
+        let migrations_users_dir = app_users_dir.join(MIGRATIONS);
+        fs::create_dir_all(&migrations_users_dir).expect("Failed to create app_users migrations");
+
+        create_test_migration_file(&migrations_users_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_users_dir,
+            2,
+            "add_field",
+            vec![("app_users", "'0001_initial'")],
+        );
+        // Rebased migrations
+        create_test_migration_file(
+            &migrations_users_dir,
+            2,
+            "add_profile",
+            vec![("app_users", "'0001_initial'")],
+        );
+        create_test_migration_file(
+            &migrations_users_dir,
+            3,
+            "add_settings",
+            vec![("app_users", "'0002_add_profile'")],
+        );
+        create_test_migration_file(
+            &migrations_users_dir,
+            4,
+            "add_preferences",
+            vec![
+                ("app_users", "'0003_add_settings'"),
+                ("app_posts", "'0003_add_comments'"),
+            ],
+        );
+
+        let max_migration_users_path = migrations_users_dir.join("max_migration.txt");
+        let conflict_users = r#"<<<<<<< HEAD
+0002_add_field
+=======
+0004_add_preferences
+>>>>>>> feature-branch"#;
+        fs::write(&max_migration_users_path, conflict_users)
+            .expect("Failed to write app_users max_migration.txt");
+
+        // Set up app_posts
+        let app_posts_dir = project_path.join("app_posts");
+        let migrations_posts_dir = app_posts_dir.join(MIGRATIONS);
+        fs::create_dir_all(&migrations_posts_dir).expect("Failed to create app_posts migrations");
+
+        create_test_migration_file(&migrations_posts_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_posts_dir,
+            2,
+            "add_post_model",
+            vec![("app_posts", "'0001_initial'")],
+        );
+        create_test_migration_file(
+            &migrations_posts_dir,
+            3,
+            "add_likes",
+            vec![("app_posts", "'0002_add_post_model'")],
+        );
+        // Rebased migration with cross-app dependency
+        create_test_migration_file(
+            &migrations_posts_dir,
+            3,
+            "add_comments",
+            vec![
+                ("app_posts", "'0002_add_post_model'"),
+                ("app_users", "'0002_add_profile'"),
+            ],
+        );
+
+        let max_migration_posts_path = migrations_posts_dir.join("max_migration.txt");
+        let conflict_posts = r#"<<<<<<< HEAD
+0003_add_likes
+=======
+0003_add_comments
+>>>>>>> feature-branch"#;
+        fs::write(&max_migration_posts_path, conflict_posts)
+            .expect("Failed to write app_posts max_migration.txt");
+
+        // Run the fix
+        let result = fix(project_path.to_str().unwrap(), false, true);
+        assert!(result.is_ok(), "Fix should succeed: {:?}", result.err());
+
+        // Verify app_users migrations were renumbered
+        assert!(
+            migrations_users_dir.join("0003_add_profile.py").exists(),
+            "app_users:0002_add_profile should be renumbered to 0003"
+        );
+        assert!(
+            migrations_users_dir.join("0004_add_settings.py").exists(),
+            "app_users:0003_add_settings should be renumbered to 0004"
+        );
+        assert!(
+            migrations_users_dir
+                .join("0005_add_preferences.py")
+                .exists(),
+            "app_users:0004_add_preferences should be renumbered to 0005"
+        );
+        assert!(
+            !migrations_users_dir.join("0002_add_profile.py").exists(),
+            "Old app_users:0002_add_profile should not exist"
+        );
+
+        // Verify app_posts migration was renumbered
+        assert!(
+            migrations_posts_dir.join("0004_add_comments.py").exists(),
+            "app_posts:0003_add_comments should be renumbered to 0004"
+        );
+        assert!(
+            !migrations_posts_dir.join("0003_add_comments.py").exists(),
+            "Old app_posts:0003_add_comments should not exist"
+        );
+
+        // Verify HEAD migrations remain unchanged
+        assert!(
+            migrations_users_dir.join("0002_add_field.py").exists(),
+            "HEAD migration app_users:0002_add_field should remain"
+        );
+        assert!(
+            migrations_posts_dir.join("0003_add_likes.py").exists(),
+            "HEAD migration app_posts:0003_add_likes should remain"
+        );
+
+        // Verify dependencies in app_users rebased migrations
+        let profile_content = fs::read_to_string(migrations_users_dir.join("0003_add_profile.py"))
+            .expect("Failed to read 0003_add_profile.py");
+        assert!(
+            profile_content.contains("('app_users', '0002_add_field')"),
+            "app_users:0003_add_profile should depend on 0002_add_field (last HEAD migration)"
+        );
+
+        let settings_content =
+            fs::read_to_string(migrations_users_dir.join("0004_add_settings.py"))
+                .expect("Failed to read 0004_add_settings.py");
+        assert!(
+            settings_content.contains("('app_users', '0003_add_profile')"),
+            "app_users:0004_add_settings should depend on 0003_add_profile"
+        );
+
+        let preferences_content =
+            fs::read_to_string(migrations_users_dir.join("0005_add_preferences.py"))
+                .expect("Failed to read 0005_add_preferences.py");
+        assert!(
+            preferences_content.contains("('app_users', '0004_add_settings')"),
+            "app_users:0005_add_preferences should depend on 0004_add_settings"
+        );
+        assert!(
+            preferences_content.contains("('app_posts', '0004_add_comments')"),
+            "app_users:0005_add_preferences should have updated bidirectional cross-app dependency to app_posts:0004_add_comments, got:\n{}",
+            preferences_content
+        );
+
+        // Verify cross-app dependency in app_posts rebased migration
+        let comments_content =
+            fs::read_to_string(migrations_posts_dir.join("0004_add_comments.py"))
+                .expect("Failed to read 0004_add_comments.py");
+        assert!(
+            comments_content.contains("('app_posts', '0003_add_likes')"),
+            "app_posts:0004_add_comments should depend on app_posts:0003_add_likes (last HEAD migration)"
+        );
+        assert!(
+            comments_content.contains("('app_users', '0003_add_profile')"),
+            "app_posts:0004_add_comments should have updated cross-app dependency to app_users:0003_add_profile, got:\n{}",
+            comments_content
+        );
+
+        // Verify max_migration.txt files were updated
+        let max_users_content = fs::read_to_string(&max_migration_users_path)
+            .expect("Failed to read app_users max_migration.txt");
+        assert_eq!(max_users_content.trim(), "0005_add_preferences");
+
+        let max_posts_content = fs::read_to_string(&max_migration_posts_path)
+            .expect("Failed to read app_posts max_migration.txt");
+        assert_eq!(max_posts_content.trim(), "0004_add_comments");
     }
 }
