@@ -1,10 +1,10 @@
 mod cli;
-mod rebase;
+mod migration;
 mod tables;
 mod utils;
 
 use cli::build as cli_builder;
-use cli::{DRY_RUN, PATH, ALL_DIRS};
+use cli::{ALL_DIRS, DRY_RUN, PATH};
 
 fn main() {
     let command = cli_builder();
@@ -14,7 +14,7 @@ fn main() {
     let dry_run = matches.get_flag(DRY_RUN);
     let all_dirs = matches.get_flag(ALL_DIRS);
 
-    match rebase::fix(search_path, dry_run, all_dirs) {
+    match migration::project::fix(search_path, dry_run, all_dirs) {
         Ok(()) => {
             if dry_run {
                 println!("Dry run completed successfully.");

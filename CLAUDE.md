@@ -65,6 +65,8 @@ cargo fmt                     # Format code
 ### Migration File Detection
 Migration files are identified by the pattern: `{4-digit-number}_{name}.py` (e.g., `0001_initial.py`)
 
+**Important**: The tool only processes migrations directories that contain a `max_migration.txt` file. Migrations folders without this file are ignored during discovery, even if they are named "migrations".
+
 ### Conflict Detection
 The tool detects migration conflicts by:
 1. Looking for `max_migration.txt` files with Git merge conflict markers (`<<<<<<< HEAD`, `=======`, `>>>>>>> `)
