@@ -37,5 +37,6 @@ Repository = "https://github.com/reinhash/rebase-migrations"
 [tool.maturin]
 # Use mixed layout to include both Rust extension and Python wrapper code
 python-source = "python"
-# "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
-features = ["pyo3/extension-module"]
+# Enable our custom python-build feature (which enables pyo3)
+# Also enable pyo3/extension-module to skip linking against libpython.so
+features = ["python-build", "pyo3/extension-module"]

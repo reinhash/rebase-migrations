@@ -1,3 +1,8 @@
+// This library is only built when the python-build feature is enabled (for Python bindings)
+// When building the CLI binary, this file is not compiled at all thanks to required-features in Cargo.toml
+
+#![cfg(feature = "python-build")]
+
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 

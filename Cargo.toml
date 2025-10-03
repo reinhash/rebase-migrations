@@ -18,15 +18,10 @@ walkdir = "2.4.0"
 regex = "1.11.1"
 rustpython-parser = "0.4.0"
 cli-table = "0.5.0"
+pyo3 = { version = "0.24.0", features = ["abi3-py38"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.10.1"
-
-[dependencies.pyo3]
-version = "0.24.0"
-# "abi3-py38" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.8
-features = ["abi3-py38"]
-optional = true
 
 [[bin]]
 name = "rebase-migrations"
@@ -36,8 +31,8 @@ test = false
 [lib]
 name = "rebase_migrations"
 crate-type = ["cdylib"]
-required-features = ["pyo3"]
+required-features = ["python-build"]
 
 [features]
 default = []
-python = ["pyo3"]
+python-build = ["pyo3"]
