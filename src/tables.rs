@@ -7,19 +7,23 @@ pub enum TableOptions<'a> {
     Summary(&'a HashMap<String, DjangoApp>),
     MigrationChanges(&'a str, &'a DjangoApp),
     MaxMigrationChanges(&'a HashMap<String, DjangoApp>),
+    SingleAppMaxMigrationChanges(&'a str, &'a DjangoApp),
 }
 
 pub fn get_table(options: TableOptions<'_>) -> cli_table::TableStruct {
     match options {
-        TableOptions::Summary(groups) => get_summary_table(groups),
-        TableOptions::MigrationChanges(app_name, group) => {
-            let combined_migrations = group
+        TableOptions::Summary(apps) => get_summary_table(apps),
+        TableOptions::MigrationChanges(app_name, app) => {
+            let combined_migrations = app
                 .head_migrations
                 .values()
-                .chain(group.rebased_migrations.iter());
+                .chain(app.rebased_migrations.iter());
             get_migration_changes_table(app_name, combined_migrations)
         }
-        TableOptions::MaxMigrationChanges(groups) => get_max_migration_changes_table(groups),
+        TableOptions::MaxMigrationChanges(apps) => get_max_migration_changes_table(apps),
+        TableOptions::SingleAppMaxMigrationChanges(app_name, app) => {
+            get_single_app_max_migration_changes_table(app_name, app)
+        }
     }
 }
 
@@ -166,14 +170,13 @@ fn get_migration_changes_table<'a>(
         ])
 }
 
-fn get_max_migration_changes_table(groups: &HashMap<String, DjangoApp>) -> cli_table::TableStruct {
-    groups
-        .values()
-        .filter_map(|group| {
-            if let MaxMigrationResult::Ok(max_file) = &group.max_migration_result {
+fn get_max_migration_changes_table(apps: &HashMap<String, DjangoApp>) -> cli_table::TableStruct {
+    apps.values()
+        .filter_map(|app| {
+            if let MaxMigrationResult::Ok(max_file) = &app.max_migration_result {
                 if let Some(new_content) = &max_file.new_content {
                     Some(vec![
-                        group.get_app_name().cell().bold(true),
+                        app.get_app_name().cell().bold(true),
                         max_file
                             .current_content
                             .0
@@ -206,4 +209,50 @@ fn get_max_migration_changes_table(groups: &HashMap<String, DjangoApp>) -> cli_t
                 .bold(true)
                 .foreground_color(Some(Color::Green)),
         ])
+}
+
+fn get_single_app_max_migration_changes_table(
+    app_name: &str,
+    app: &DjangoApp,
+) -> cli_table::TableStruct {
+    if let MaxMigrationResult::Ok(max_file) = &app.max_migration_result {
+        if let Some(new_content) = &max_file.new_content {
+            vec![vec![
+                app_name.cell().bold(true),
+                max_file
+                    .current_content
+                    .0
+                    .clone()
+                    .cell()
+                    .foreground_color(Some(Color::Red)),
+                new_content
+                    .0
+                    .clone()
+                    .cell()
+                    .foreground_color(Some(Color::Green)),
+            ]]
+            .table()
+            .title(vec![
+                "App".cell().bold(true).foreground_color(Some(Color::Cyan)),
+                "Current max_migration.txt"
+                    .cell()
+                    .bold(true)
+                    .foreground_color(Some(Color::Red)),
+                "New max_migration.txt"
+                    .cell()
+                    .bold(true)
+                    .foreground_color(Some(Color::Green)),
+            ])
+        } else {
+            // Return an empty table if there are no changes
+            vec![vec!["No changes".cell()]]
+                .table()
+                .title(vec!["max_migration.txt".cell().bold(true)])
+        }
+    } else {
+        // Return an empty table if max_migration_result is not Ok
+        vec![vec!["No changes".cell()]]
+            .table()
+            .title(vec!["max_migration.txt".cell().bold(true)])
+    }
 }

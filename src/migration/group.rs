@@ -26,7 +26,8 @@ impl TryFrom<&Path> for DjangoApp {
         if !value.join(MIGRATIONS).exists() {
             return Err("Provided path does not contain migrations folder".into());
         }
-        if !value.join(MAX_MIGRATION_TXT).exists() {
+        let migrations_path = value.join(MIGRATIONS);
+        if !migrations_path.join(MAX_MIGRATION_TXT).exists() {
             return Err("Provided path does not contain max_migrations.txt".into());
         }
         let django_app = DjangoApp::create(value)?;
@@ -296,6 +297,70 @@ impl DjangoApp {
             .as_os_str()
             .to_str()
             .expect("We must be able to convert the app name to a string")
+    }
+
+    /// Applies all migration changes (file renames and dependency updates) and max_migration.txt updates.
+    pub fn apply_changes(&self) -> Result<(), String> {
+        // Combine both migration collections for applying changes
+        let all_migrations: Vec<&Migration> = self
+            .head_migrations
+            .values()
+            .chain(self.rebased_migrations.iter())
+            .collect();
+
+        for migration in all_migrations {
+            migration.apply_changes()?
+        }
+        if let MaxMigrationResult::Ok(max_file) = &self.max_migration_result {
+            max_file.apply_change(&self.directory)?;
+        }
+        Ok(())
+    }
+
+    /// Displays a summary of all changes that will be applied.
+    pub fn changes_summary(&self) {
+        let has_migration_changes = self
+            .head_migrations
+            .values()
+            .any(|m| m.name_change.is_some() || m.dependency_change.is_some())
+            || self
+                .rebased_migrations
+                .iter()
+                .any(|m| m.name_change.is_some() || m.dependency_change.is_some());
+
+        if has_migration_changes {
+            println!(
+                "{}",
+                crate::tables::get_table(crate::tables::TableOptions::MigrationChanges(
+                    self.get_app_name(),
+                    self
+                ))
+                .display()
+                .unwrap()
+            );
+        }
+
+        let has_max_migration_changes =
+            if let MaxMigrationResult::Ok(max_file) = &self.max_migration_result {
+                max_file.new_content.is_some()
+            } else {
+                false
+            };
+
+        if has_max_migration_changes {
+            println!();
+            println!(
+                "{}",
+                crate::tables::get_table(
+                    crate::tables::TableOptions::SingleAppMaxMigrationChanges(
+                        self.get_app_name(),
+                        self
+                    )
+                )
+                .display()
+                .unwrap()
+            );
+        }
     }
 }
 
@@ -604,6 +669,187 @@ mod tests {
         assert_eq!(
             dep_change.new_dependencies[0].migration_file.0,
             "0005_initial"
+        );
+    }
+
+    #[test]
+    fn test_django_app_apply_changes() {
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create test migrations - HEAD branch
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("test_app", "'0001_initial'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "head_change",
+            vec![("test_app", "'0002_add_field'")],
+        );
+        // Feature branch migration
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "rebased_change",
+            vec![("test_app", "'0002_add_field'")],
+        );
+
+        // Create max_migration.txt with conflict
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
+        let conflict_content = r#"<<<<<<< HEAD
+0003_head_change
+=======
+0003_rebased_change
+>>>>>>> feature-branch"#;
+        fs::write(&max_migration_path, conflict_content)
+            .expect("Failed to write max migration file");
+
+        // Load the app
+        let mut app = DjangoApp::create(migrations_dir.parent().unwrap()).unwrap();
+
+        // Set up the conflict and create changes
+        if let MaxMigrationResult::Conflict(conflict) = &app.max_migration_result {
+            let conflict = conflict.clone();
+            app.set_last_common_migration(conflict.incoming_change.clone())
+                .unwrap();
+            app.create_migration_name_changes(conflict);
+        }
+        let empty_lookup = HashMap::new();
+        app.create_migration_dependency_changes(true, &empty_lookup);
+
+        // Apply changes
+        let result = app.apply_changes();
+        assert!(result.is_ok(), "apply_changes should succeed");
+
+        // Verify file was renamed (from 0003 to 0004)
+        assert!(
+            !migrations_dir.join("0003_rebased_change.py").exists(),
+            "Old file should be renamed"
+        );
+        assert!(
+            migrations_dir.join("0004_rebased_change.py").exists(),
+            "New file should exist (renumbered from 0003 to 0004)"
+        );
+
+        // Verify max_migration.txt was updated
+        let max_content = fs::read_to_string(&max_migration_path).unwrap();
+        assert_eq!(max_content.trim(), "0004_rebased_change");
+    }
+
+    #[test]
+    fn test_django_app_changes_summary() {
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create test migrations - HEAD branch
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("test_app", "'0001_initial'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "head_change",
+            vec![("test_app", "'0002_add_field'")],
+        );
+        // Feature branch migration
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "rebased_change",
+            vec![("test_app", "'0002_add_field'")],
+        );
+
+        // Create max_migration.txt with conflict
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
+        let conflict_content = r#"<<<<<<< HEAD
+0003_head_change
+=======
+0003_rebased_change
+>>>>>>> feature-branch"#;
+        fs::write(&max_migration_path, conflict_content)
+            .expect("Failed to write max migration file");
+
+        // Load the app
+        let mut app = DjangoApp::create(migrations_dir.parent().unwrap()).unwrap();
+
+        // Set up the conflict and create changes
+        if let MaxMigrationResult::Conflict(conflict) = &app.max_migration_result {
+            let conflict = conflict.clone();
+            app.set_last_common_migration(conflict.incoming_change.clone())
+                .unwrap();
+            app.create_migration_name_changes(conflict);
+        }
+        let empty_lookup = HashMap::new();
+        app.create_migration_dependency_changes(true, &empty_lookup);
+
+        // This should not panic - just testing that it runs without error
+        app.changes_summary();
+
+        // Verify that changes were created
+        assert!(
+            app.rebased_migrations
+                .iter()
+                .any(|m| m.name_change.is_some()),
+            "Should have name changes"
+        );
+    }
+
+    #[test]
+    fn test_django_app_try_from_valid_path() {
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create a simple migration
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+
+        // Create max_migration.txt
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
+        fs::write(&max_migration_path, "0001_initial\n")
+            .expect("Failed to write max migration file");
+
+        // Test TryFrom
+        let app_path = migrations_dir.parent().unwrap();
+        let result = DjangoApp::try_from(app_path);
+
+        assert!(result.is_ok(), "Should successfully create DjangoApp");
+        let app = result.unwrap();
+        assert_eq!(app.head_migrations.len(), 1);
+    }
+
+    #[test]
+    fn test_django_app_try_from_no_migrations_folder() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let app_path = temp_dir.path().join("test_app");
+        fs::create_dir_all(&app_path).expect("Failed to create app directory");
+
+        let result = DjangoApp::try_from(app_path.as_path());
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Provided path does not contain migrations folder"
+        );
+    }
+
+    #[test]
+    fn test_django_app_try_from_no_max_migration_txt() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let app_path = temp_dir.path().join("test_app");
+        let migrations_dir = app_path.join(MIGRATIONS);
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        let result = DjangoApp::try_from(app_path.as_path());
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Provided path does not contain max_migrations.txt"
         );
     }
 }
