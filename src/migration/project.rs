@@ -186,8 +186,6 @@ impl DjangoProject {
 
     fn apply_changes(&mut self) -> Result<(), String> {
         for group in self.apps.values() {
-            let migrations_dir = group.directory.clone();
-
             // Combine both migration collections for applying changes
             let all_migrations: Vec<&Migration> = group
                 .head_migrations
@@ -196,15 +194,10 @@ impl DjangoProject {
                 .collect();
 
             for migration in all_migrations {
-                if let Some(changes) = &migration.name_change {
-                    changes.apply_change(&migration)?
-                }
-                if let Some(changes) = &migration.dependency_change {
-                    changes.apply_change(&migration)?
-                }
+                migration.apply_changes()?
             }
             if let MaxMigrationResult::Ok(max_file) = &group.max_migration_result {
-                max_file.apply_change(&migrations_dir)?;
+                max_file.apply_change(&group.directory)?;
             }
         }
         Ok(())

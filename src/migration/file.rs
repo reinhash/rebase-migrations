@@ -224,6 +224,16 @@ impl Migration {
         self.file_path.parent().unwrap().to_path_buf()
     }
 
+    pub fn apply_changes(&self) -> Result<(), String> {
+        if let Some(changes) = &self.name_change {
+            changes.apply_change(&self)?
+        }
+        if let Some(changes) = &self.dependency_change {
+            changes.apply_change(&self)?
+        }
+        Ok(())
+    }
+
     /// Check that no merge migration exists in one of the rebased migrations.
     pub fn is_merge_migration(&self) -> Result<(), String> {
         let dependency_condition = self
