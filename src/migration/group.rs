@@ -11,7 +11,7 @@ use crate::migration::file::{
 };
 
 #[derive(Debug)]
-pub struct MigrationGroup {
+pub struct DjangoApp {
     pub head_migrations: HashMap<PathBuf, Migration>,
     pub directory: PathBuf,
     pub last_common_migration: Option<MigrationFileName>,
@@ -19,7 +19,7 @@ pub struct MigrationGroup {
     pub rebased_migrations: Vec<Migration>,
 }
 
-impl MigrationGroup {
+impl DjangoApp {
     /// Updates migration dependencies within this group based on file name changes.
     ///
     /// This method handles two distinct scenarios for updating migration dependencies:
@@ -284,7 +284,7 @@ impl MigrationGroup {
     }
 }
 
-impl MigrationGroup {
+impl DjangoApp {
     pub fn create(app_path: &Path) -> Result<Self, String> {
         let directory = app_path.join(MIGRATIONS);
 

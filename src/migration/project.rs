@@ -3,7 +3,7 @@ use walkdir::WalkDir;
 
 use crate::migration::change::MigrationFileNameChange;
 use crate::migration::file::{MAX_MIGRATION_TXT, MIGRATIONS, MaxMigrationResult, Migration};
-use crate::migration::group::MigrationGroup;
+use crate::migration::group::DjangoApp;
 use crate::tables::{TableOptions, get_table};
 
 // Common directories to skip during traversal for performance
@@ -91,7 +91,7 @@ pub fn fix(search_path: &str, dry_run: bool, all_dirs: bool) -> Result<(), Strin
 
 #[derive(Debug)]
 pub(crate) struct DjangoProject {
-    pub(crate) apps: HashMap<String, MigrationGroup>,
+    pub(crate) apps: HashMap<String, DjangoApp>,
 }
 
 impl DjangoProject {
@@ -133,7 +133,7 @@ impl DjangoProject {
                         path.display()
                     )
                 })?;
-                let migration_group = MigrationGroup::create(app_path)?;
+                let migration_group = DjangoApp::create(app_path)?;
                 let app_name = migration_group.get_app_name();
                 apps.insert(app_name.to_string(), migration_group);
             }

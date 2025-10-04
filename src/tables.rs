@@ -1,12 +1,12 @@
 use crate::migration::file::{MaxMigrationResult, Migration};
-use crate::migration::group::MigrationGroup;
+use crate::migration::group::DjangoApp;
 use cli_table::{Cell, Color, Style, Table};
 use std::collections::HashMap;
 
 pub enum TableOptions<'a> {
-    Summary(&'a HashMap<String, MigrationGroup>),
-    MigrationChanges(&'a str, &'a MigrationGroup),
-    MaxMigrationChanges(&'a HashMap<String, MigrationGroup>),
+    Summary(&'a HashMap<String, DjangoApp>),
+    MigrationChanges(&'a str, &'a DjangoApp),
+    MaxMigrationChanges(&'a HashMap<String, DjangoApp>),
 }
 
 pub fn get_table(options: TableOptions<'_>) -> cli_table::TableStruct {
@@ -23,7 +23,7 @@ pub fn get_table(options: TableOptions<'_>) -> cli_table::TableStruct {
     }
 }
 
-fn get_summary_table(groups: &HashMap<String, MigrationGroup>) -> cli_table::TableStruct {
+fn get_summary_table(groups: &HashMap<String, DjangoApp>) -> cli_table::TableStruct {
     groups
         .values()
         .map(|group| {
@@ -166,9 +166,7 @@ fn get_migration_changes_table<'a>(
         ])
 }
 
-fn get_max_migration_changes_table(
-    groups: &HashMap<String, MigrationGroup>,
-) -> cli_table::TableStruct {
+fn get_max_migration_changes_table(groups: &HashMap<String, DjangoApp>) -> cli_table::TableStruct {
     groups
         .values()
         .filter_map(|group| {
