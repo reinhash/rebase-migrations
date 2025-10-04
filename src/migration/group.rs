@@ -19,6 +19,21 @@ pub struct DjangoApp {
     pub rebased_migrations: Vec<Migration>,
 }
 
+impl TryFrom<&Path> for DjangoApp {
+    type Error = String;
+
+    fn try_from(value: &Path) -> Result<Self, Self::Error> {
+        if !value.join(MIGRATIONS).exists() {
+            return Err("Provided path does not contain migrations folder".into());
+        }
+        if !value.join(MAX_MIGRATION_TXT).exists() {
+            return Err("Provided path does not contain max_migrations.txt".into());
+        }
+        let django_app = DjangoApp::create(value)?;
+        Ok(django_app)
+    }
+}
+
 impl DjangoApp {
     /// Updates migration dependencies within this group based on file name changes.
     ///

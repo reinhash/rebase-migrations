@@ -213,10 +213,15 @@ impl Migration {
         }
     }
 
-    pub fn new_full_path(&self, directory: &Path) -> Option<PathBuf> {
+    pub fn new_full_path(&self) -> Option<PathBuf> {
+        let directory = self.parent_directory();
         let name_change = self.name_change.clone()?;
         let new_path = directory.join(name_change.new_name.0);
         Some(new_path.with_extension("py"))
+    }
+
+    pub fn parent_directory(&self) -> PathBuf {
+        self.file_path.parent().unwrap().to_path_buf()
     }
 
     /// Check that no merge migration exists in one of the rebased migrations.

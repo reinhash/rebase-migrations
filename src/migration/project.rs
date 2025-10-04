@@ -197,16 +197,10 @@ impl DjangoProject {
 
             for migration in all_migrations {
                 if let Some(changes) = &migration.name_change {
-                    changes.apply_change(&migrations_dir)?
+                    changes.apply_change(&migration)?
                 }
                 if let Some(changes) = &migration.dependency_change {
-                    let migration_path =
-                        if let Some(new_path) = migration.new_full_path(&migrations_dir) {
-                            new_path
-                        } else {
-                            migration.file_path.clone()
-                        };
-                    changes.apply_change(&migration_path)?
+                    changes.apply_change(&migration)?
                 }
             }
             if let MaxMigrationResult::Ok(max_file) = &group.max_migration_result {

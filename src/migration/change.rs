@@ -1,7 +1,6 @@
 use std::fmt::Display;
-use std::path::{Path, PathBuf};
 
-use crate::migration::file::{MigrationDependency, MigrationFileName};
+use crate::migration::file::{Migration, MigrationDependency, MigrationFileName};
 use crate::migration::parser::MigrationParser;
 use crate::utils::replace_range_in_file;
 
@@ -16,7 +15,8 @@ impl MigrationFileNameChange {
         Self { old_name, new_name }
     }
 
-    pub fn apply_change(&self, migrations_dir: &Path) -> Result<(), String> {
+    pub fn apply_change(&self, migration: &Migration) -> Result<(), String> {
+        let migrations_dir = migration.parent_directory();
         let old_path = migrations_dir.join(&self.old_name.0).with_extension("py");
         let new_path = migrations_dir.join(&self.new_name.0).with_extension("py");
         std::fs::rename(old_path, new_path).map_err(|e| format!("Failed to rename file: {}", e))?;
@@ -47,8 +47,13 @@ impl MigrationDependencyChange {
         }
     }
 
-    pub fn apply_change(&self, migration_path: &PathBuf) -> Result<(), String> {
-        let parser = MigrationParser::new(migration_path)?;
+    pub fn apply_change(&self, migration: &Migration) -> Result<(), String> {
+        let migration_path = if let Some(new_path) = migration.new_full_path() {
+            new_path
+        } else {
+            migration.file_path.clone()
+        };
+        let parser = MigrationParser::new(&migration_path)?;
         let (start, end) = parser.find_dependency_location()?;
         let replacement = self.generate_replacement_string();
         replace_range_in_file(
@@ -114,8 +119,19 @@ mod tests {
             MigrationFileName("0003_initial".to_string()),
         );
 
+        // Create a Migration object for the test
+        let migration = Migration {
+            file_path: old_file_path.clone(),
+            file_name: MigrationFileName("0001_initial".to_string()),
+            app_name: "testapp".to_string(),
+            dependencies: vec![],
+            from_rebased_branch: false,
+            name_change: Some(name_change.clone()),
+            dependency_change: None,
+        };
+
         // Apply the change
-        let result = name_change.apply_change(&migrations_dir);
+        let result = name_change.apply_change(&migration);
         assert!(result.is_ok());
 
         // Verify the old file no longer exists and new file exists
@@ -140,8 +156,20 @@ mod tests {
             MigrationFileName("0003_nonexistent".to_string()),
         );
 
+        // Create a Migration object for the test with non-existent file
+        let migration_file = migrations_dir.join("0001_nonexistent.py");
+        let migration = Migration {
+            file_path: migration_file,
+            file_name: MigrationFileName("0001_nonexistent".to_string()),
+            app_name: "testapp".to_string(),
+            dependencies: vec![],
+            from_rebased_branch: false,
+            name_change: Some(name_change.clone()),
+            dependency_change: None,
+        };
+
         // Apply the change - should fail
-        let result = name_change.apply_change(&migrations_dir);
+        let result = name_change.apply_change(&migration);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to rename file"));
     }
@@ -199,10 +227,21 @@ class Migration(migrations.Migration):
         ];
 
         // Create a MigrationDependencyChange
-        let dependency_change = MigrationDependencyChange::new(old_dependencies, new_dependencies);
+        let dependency_change = MigrationDependencyChange::new(old_dependencies.clone(), new_dependencies);
+
+        // Create a Migration object for the test
+        let migration = Migration {
+            file_path: migration_file.clone(),
+            file_name: MigrationFileName("0003_test_migration".to_string()),
+            app_name: "testapp".to_string(),
+            dependencies: old_dependencies,
+            from_rebased_branch: false,
+            name_change: None,
+            dependency_change: Some(dependency_change.clone()),
+        };
 
         // Apply the change
-        let result = dependency_change.apply_change(&migration_file);
+        let result = dependency_change.apply_change(&migration);
         assert!(result.is_ok());
 
         // Read the updated file and verify the dependencies were changed
@@ -240,10 +279,21 @@ class Migration(migrations.Migration):
             migration_file: MigrationFileName("0002_add_field".to_string()),
         }];
 
-        let dependency_change = MigrationDependencyChange::new(old_dependencies, new_dependencies);
+        let dependency_change = MigrationDependencyChange::new(old_dependencies.clone(), new_dependencies);
+
+        // Create a Migration object for the test
+        let migration = Migration {
+            file_path: migration_file.clone(),
+            file_name: MigrationFileName("0001_initial".to_string()),
+            app_name: "testapp".to_string(),
+            dependencies: old_dependencies,
+            from_rebased_branch: false,
+            name_change: None,
+            dependency_change: Some(dependency_change.clone()),
+        };
 
         // Apply the change
-        let result = dependency_change.apply_change(&migration_file);
+        let result = dependency_change.apply_change(&migration);
         assert!(result.is_ok());
 
         // Verify the dependencies were added
@@ -262,8 +312,19 @@ class Migration(migrations.Migration):
 
         let dependency_change = MigrationDependencyChange::new(vec![], vec![]);
 
+        // Create a Migration object for the test with non-existent file
+        let migration = Migration {
+            file_path: migration_file,
+            file_name: MigrationFileName("nonexistent".to_string()),
+            app_name: "testapp".to_string(),
+            dependencies: vec![],
+            from_rebased_branch: false,
+            name_change: None,
+            dependency_change: Some(dependency_change.clone()),
+        };
+
         // Apply change to non-existent file - should fail
-        let result = dependency_change.apply_change(&migration_file);
+        let result = dependency_change.apply_change(&migration);
         assert!(result.is_err());
     }
 }
