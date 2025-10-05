@@ -61,7 +61,12 @@ const SKIP_DIRECTORIES: &[&str] = &[
     "docs",
 ];
 
-pub fn rebase_apps(search_path: &str, dry_run: bool, all_dirs: bool) -> Result<(), String> {
+pub fn rebase_apps(
+    search_path: &str,
+    dry_run: bool,
+    all_dirs: bool,
+    json: bool,
+) -> Result<(), String> {
     let search_path = Path::new(search_path);
     let mut django_project = DjangoProject::from_path(search_path, all_dirs)?;
     if django_project.apps.is_empty() {
@@ -79,14 +84,19 @@ pub fn rebase_apps(search_path: &str, dry_run: bool, all_dirs: bool) -> Result<(
     django_project.create_migration_dependency_changes(false);
 
     if dry_run {
-        django_project.changes_summary();
+        if json {
+            let json_output = django_project.to_json()?;
+            println!("{}", json_output);
+        } else {
+            django_project.changes_summary();
+        }
     } else {
         django_project.apply_changes()?;
     }
     Ok(())
 }
 
-pub fn rebase_app(app_path: &Path, dry_run: bool) -> Result<(), String> {
+pub fn rebase_app(app_path: &Path, dry_run: bool, json: bool) -> Result<(), String> {
     let mut django_app = DjangoApp::try_from(app_path)?;
     let empty_lookup = HashMap::new();
     if let MaxMigrationResult::Conflict(conflict) = &django_app.max_migration_result {
@@ -96,7 +106,12 @@ pub fn rebase_app(app_path: &Path, dry_run: bool) -> Result<(), String> {
     }
     django_app.create_migration_dependency_changes(true, &empty_lookup);
     if dry_run {
-        django_app.changes_summary();
+        if json {
+            let json_output = django_app.to_json()?;
+            println!("{}", json_output);
+        } else {
+            django_app.changes_summary();
+        }
     } else {
         django_app.apply_changes()?;
     }
@@ -207,6 +222,11 @@ impl DjangoProject {
             group.apply_changes()?;
         }
         Ok(())
+    }
+
+    fn to_json(&self) -> Result<String, String> {
+        let json_changes = crate::json_output::JsonProjectChanges::try_from(self)?;
+        json_changes.to_json()
     }
 
     fn changes_summary(&self) {
@@ -497,7 +517,7 @@ mod tests {
         fs::write(&max_migration_path, conflict_content)
             .expect("Failed to write max migration file");
 
-        let _result = rebase_apps(migrations_dir.to_str().unwrap(), false, true).unwrap();
+        let _result = rebase_apps(migrations_dir.to_str().unwrap(), false, true, false).unwrap();
         let mut django_project = DjangoProject::from_path(&migrations_dir, true).unwrap();
         let app = django_project.apps.get_mut("test_app").unwrap();
 
@@ -693,7 +713,7 @@ mod tests {
         fs::write(&max_migration_path, conflict_content)
             .expect("Failed to write max migration file");
 
-        let result = rebase_apps(temp_dir.path().to_str().unwrap(), false, true);
+        let result = rebase_apps(temp_dir.path().to_str().unwrap(), false, true, false);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
@@ -793,7 +813,7 @@ mod tests {
         fs::write(&max_migration_path, conflict_content)
             .expect("Failed to write max migration file");
 
-        let result = rebase_apps(temp_dir.path().to_str().unwrap(), false, true);
+        let result = rebase_apps(temp_dir.path().to_str().unwrap(), false, true, false);
         assert!(result.is_ok(), "Fix should succeed: {:?}", result.err());
 
         // Verify the migrations were renumbered correctly
@@ -964,7 +984,7 @@ mod tests {
         fs::write(&max_migration_b_path, conflict_b)
             .expect("Failed to write app_b max_migration.txt");
 
-        let result = rebase_apps(project_path.to_str().unwrap(), false, true);
+        let result = rebase_apps(project_path.to_str().unwrap(), false, true, false);
         assert!(result.is_ok(), "Fix should succeed: {:?}", result.err());
 
         // Verify app_a migrations were renumbered
@@ -1131,7 +1151,7 @@ mod tests {
         fs::write(&max_migration_posts_path, conflict_posts)
             .expect("Failed to write app_posts max_migration.txt");
 
-        let result = rebase_apps(project_path.to_str().unwrap(), false, true);
+        let result = rebase_apps(project_path.to_str().unwrap(), false, true, false);
         assert!(result.is_ok(), "Fix should succeed: {:?}", result.err());
 
         // Verify app_users migrations were renumbered
@@ -1267,7 +1287,7 @@ mod tests {
 
         // Run rebase_app
         let app_path = migrations_dir.parent().unwrap();
-        let result = rebase_app(app_path, false);
+        let result = rebase_app(app_path, false, false);
 
         assert!(result.is_ok(), "rebase_app should succeed");
 
@@ -1326,7 +1346,7 @@ mod tests {
 
         // Run rebase_app in dry-run mode
         let app_path = migrations_dir.parent().unwrap();
-        let result = rebase_app(app_path, true);
+        let result = rebase_app(app_path, true, false);
 
         assert!(result.is_ok(), "rebase_app dry run should succeed");
 
@@ -1367,9 +1387,12 @@ mod tests {
 
         // Run rebase_app
         let app_path = migrations_dir.parent().unwrap();
-        let result = rebase_app(app_path, false);
+        let result = rebase_app(app_path, false, false);
 
-        assert!(result.is_ok(), "rebase_app should succeed even without conflict");
+        assert!(
+            result.is_ok(),
+            "rebase_app should succeed even without conflict"
+        );
 
         // Verify files remain unchanged
         assert!(migrations_dir.join("0002_add_field.py").exists());
@@ -1381,7 +1404,7 @@ mod tests {
         let app_path = temp_dir.path().join("test_app");
         fs::create_dir_all(&app_path).expect("Failed to create app directory");
 
-        let result = rebase_app(&app_path, false);
+        let result = rebase_app(&app_path, false, false);
 
         assert!(result.is_err());
         assert_eq!(
@@ -1397,7 +1420,7 @@ mod tests {
         let migrations_dir = app_path.join(MIGRATIONS);
         fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
 
-        let result = rebase_app(&app_path, false);
+        let result = rebase_app(&app_path, false, false);
 
         assert!(result.is_err());
         assert_eq!(
@@ -1446,7 +1469,7 @@ mod tests {
 
         // Run rebase_app
         let app_path = migrations_dir.parent().unwrap();
-        let result = rebase_app(app_path, false);
+        let result = rebase_app(app_path, false, false);
 
         assert!(result.is_ok(), "rebase_app should succeed");
 

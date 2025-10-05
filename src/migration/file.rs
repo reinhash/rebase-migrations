@@ -1,4 +1,5 @@
 use rustpython_parser::ast;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,8 @@ use crate::migration::parser::MigrationParser;
 pub const MIGRATIONS: &str = "migrations";
 pub const MAX_MIGRATION_TXT: &str = "max_migration.txt";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
 pub struct MigrationFileName(pub String);
 
 impl TryFrom<&ast::Expr> for MigrationFileName {
@@ -340,7 +342,7 @@ impl Iterator for MigrationIterator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MigrationDependency {
     pub app: String,
     pub migration_file: MigrationFileName,

@@ -18,6 +18,8 @@ walkdir = "2.4.0"
 regex = "1.11.1"
 rustpython-parser = "0.4.0"
 cli-table = "0.5.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 pyo3 = { version = "0.24.0", features = ["abi3-py38"], optional = true }
 
 [dev-dependencies]

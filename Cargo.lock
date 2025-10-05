@@ -627,6 +627,8 @@ dependencies = [
  "pyo3",
  "regex",
  "rustpython-parser",
+ "serde",
+ "serde_json",
  "tempfile",
  "walkdir",
 ]
@@ -758,6 +760,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd6c24dee235d0da097043389623fb913daddf92c76e9f5a1db88607a0bcbd1d"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -778,6 +781,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.145"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c"
+dependencies = [
+ "itoa",
+ "memchr",
+ "ryu",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

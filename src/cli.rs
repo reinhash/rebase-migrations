@@ -6,6 +6,7 @@ pub const PATH_DEFAULT: &str = ".";
 pub const PATH_SHORT: char = 'p';
 pub const ALL_DIRS: &str = "all-dirs";
 pub const APP_PATH: &str = "app-path";
+pub const JSON: &str = "json";
 
 pub fn build() -> Command {
     Command::new("rebase-migrations")
@@ -38,5 +39,12 @@ pub fn build() -> Command {
             .help("Only scan and rebase one django app with the path provided")
             .value_name("APP_PATH")
             .value_parser(clap::value_parser!(std::path::PathBuf)),
+        )
+        .arg(
+            Arg::new(JSON)
+            .long(JSON)
+            .help("Output changes in JSON format (only works with --dry-run)")
+            .action(clap::ArgAction::SetTrue)
+            .requires(DRY_RUN),
         )
 }

@@ -317,6 +317,12 @@ impl DjangoApp {
         Ok(())
     }
 
+    /// Returns a JSON representation of all changes.
+    pub fn to_json(&self) -> Result<String, String> {
+        let json_changes = crate::json_output::JsonAppChanges::try_from(self)?;
+        json_changes.to_json()
+    }
+
     /// Displays a summary of all changes that will be applied.
     pub fn changes_summary(&self) {
         let has_migration_changes = self

@@ -1,10 +1,11 @@
+use serde::Serialize;
 use std::fmt::Display;
 
 use crate::migration::file::{Migration, MigrationDependency, MigrationFileName};
 use crate::migration::parser::MigrationParser;
 use crate::utils::replace_range_in_file;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MigrationFileNameChange {
     pub old_name: MigrationFileName,
     pub new_name: MigrationFileName,
@@ -30,7 +31,7 @@ impl Display for MigrationFileNameChange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MigrationDependencyChange {
     pub old_dependencies: Vec<MigrationDependency>,
     pub new_dependencies: Vec<MigrationDependency>,
