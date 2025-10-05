@@ -2,6 +2,7 @@ use std::{collections::HashMap, path::Path};
 use walkdir::WalkDir;
 
 use crate::migration::change::MigrationFileNameChange;
+use crate::migration::changeset::ProjectChangeSet;
 use crate::migration::file::{MAX_MIGRATION_TXT, MIGRATIONS, MaxMigrationResult};
 use crate::migration::group::DjangoApp;
 use crate::tables::{TableOptions, get_table};
@@ -225,8 +226,8 @@ impl DjangoProject {
     }
 
     fn to_json(&self) -> Result<String, String> {
-        let json_changes = crate::json_output::JsonProjectChanges::try_from(self)?;
-        json_changes.to_json()
+        let changeset = ProjectChangeSet::from(self);
+        changeset.to_json()
     }
 
     fn changes_summary(&self) {

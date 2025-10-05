@@ -1,5 +1,4 @@
 mod cli;
-mod json_output;
 mod migration;
 mod tables;
 mod utils;

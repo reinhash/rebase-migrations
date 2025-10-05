@@ -8,7 +8,6 @@ use pyo3::prelude::*;
 
 use std::path::Path;
 
-mod json_output;
 mod migration;
 mod tables;
 mod utils;

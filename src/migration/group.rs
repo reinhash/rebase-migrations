@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::migration::change::{MigrationDependencyChange, MigrationFileNameChange};
+use crate::migration::changeset::AppChangeSet;
 use crate::migration::file::{
     MAX_MIGRATION_TXT, MIGRATIONS, MaxMigrationFile, MaxMigrationResult, MergeConflict, Migration,
     MigrationDependency, MigrationFileName,
@@ -319,8 +320,8 @@ impl DjangoApp {
 
     /// Returns a JSON representation of all changes.
     pub fn to_json(&self) -> Result<String, String> {
-        let json_changes = crate::json_output::JsonAppChanges::try_from(self)?;
-        json_changes.to_json()
+        let changeset = AppChangeSet::from(self);
+        changeset.to_json()
     }
 
     /// Displays a summary of all changes that will be applied.
