@@ -67,7 +67,7 @@ pub fn rebase_apps(
     dry_run: bool,
     all_dirs: bool,
     json: bool,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let search_path = Path::new(search_path);
     let mut django_project = DjangoProject::from_path(search_path, all_dirs)?;
     if django_project.apps.is_empty() {
@@ -87,17 +87,18 @@ pub fn rebase_apps(
     if dry_run {
         if json {
             let json_output = django_project.to_json()?;
-            println!("{}", json_output);
+            Ok(Some(json_output))
         } else {
             django_project.changes_summary();
+            Ok(None)
         }
     } else {
         django_project.apply_changes()?;
+        Ok(None)
     }
-    Ok(())
 }
 
-pub fn rebase_app(app_path: &Path, dry_run: bool, json: bool) -> Result<(), String> {
+pub fn rebase_app(app_path: &Path, dry_run: bool, json: bool) -> Result<Option<String>, String> {
     let mut django_app = DjangoApp::try_from(app_path)?;
     let empty_lookup = HashMap::new();
     if let MaxMigrationResult::Conflict(conflict) = &django_app.max_migration_result {
@@ -109,14 +110,15 @@ pub fn rebase_app(app_path: &Path, dry_run: bool, json: bool) -> Result<(), Stri
     if dry_run {
         if json {
             let json_output = django_app.to_json()?;
-            println!("{}", json_output);
+            Ok(Some(json_output))
         } else {
             django_app.changes_summary();
+            Ok(None)
         }
     } else {
         django_app.apply_changes()?;
+        Ok(None)
     }
-    Ok(())
 }
 
 #[derive(Debug)]

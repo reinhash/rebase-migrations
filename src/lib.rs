@@ -20,11 +20,14 @@ mod utils;
 ///     path: Path to the Django project directory
 ///     dry_run: If True, preview changes without applying them (default: False)
 ///     all_dirs: If True, scan all directories for performance (default: False)
-///     json: If True, return JSON output instead of printing tables (requires dry_run=True) (default: False)
+///     json: If True, return JSON output as a string (requires dry_run=True) (default: False)
+///
+/// Returns:
+///     Optional[str]: JSON string if dry_run=True and json=True, otherwise None
 ///
 /// Raises:
 ///     RuntimeError: If the migration rebase operation fails
-fn run_rebase(path: &str, dry_run: bool, all_dirs: bool, json: bool) -> PyResult<()> {
+fn run_rebase(path: &str, dry_run: bool, all_dirs: bool, json: bool) -> PyResult<Option<String>> {
     migration::project::rebase_apps(path, dry_run, all_dirs, json)
         .map_err(PyErr::new::<PyRuntimeError, _>)
 }
@@ -36,11 +39,14 @@ fn run_rebase(path: &str, dry_run: bool, all_dirs: bool, json: bool) -> PyResult
 /// Args:
 ///     app_path: Path to the Django App directory
 ///     dry_run: If True, preview changes without applying them (default: False)
-///     json: If True, return JSON output instead of printing tables (requires dry_run=True) (default: False)
+///     json: If True, return JSON output as a string (requires dry_run=True) (default: False)
+///
+/// Returns:
+///     Optional[str]: JSON string if dry_run=True and json=True, otherwise None
 ///
 /// Raises:
 ///     RuntimeError: If the migration rebase operation fails
-fn run_rebase_for_one_app(app_path: &str, dry_run: bool, json: bool) -> PyResult<()> {
+fn run_rebase_for_one_app(app_path: &str, dry_run: bool, json: bool) -> PyResult<Option<String>> {
     let app_path = Path::new(app_path);
     migration::project::rebase_app(app_path, dry_run, json).map_err(PyErr::new::<PyRuntimeError, _>)
 }

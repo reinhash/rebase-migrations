@@ -36,9 +36,9 @@ fn main() {
     };
 
     match result {
-        Ok(()) => {
-            if json == true {
-                return;
+        Ok(json_output) => {
+            if let Some(json_str) = json_output {
+                println!("{}", json_str);
             } else if dry_run {
                 println!("Dry run completed successfully.");
             } else {
