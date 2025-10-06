@@ -10,7 +10,7 @@ pub const JSON: &str = "json";
 
 pub fn build() -> Command {
     Command::new("rebase-migrations")
-        .version("0.2.0")
+        .version("0.4.0")
         .author("Reinhard Scheuerle")
         .about("A tool to help with migration rebasing for django.")
         .arg(
