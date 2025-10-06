@@ -1,9 +1,7 @@
 """Python library for Django migration conflict resolution during git rebases."""
 
-import os
-from .rebase_migrations import run_rebase, run_rebase_for_one_app
-
 def _expand_path(path):
+    import os
     """Expand tilde and resolve relative paths"""
     expanded_path = os.path.expanduser(path)
     absolute_path = os.path.abspath(expanded_path)
@@ -24,6 +22,7 @@ def execute(path, all_dirs=False):
     Raises:
         RuntimeError: If the migration rebase operation fails
     """
+    from .rebase_migrations import run_rebase
 
     absolute_path = _expand_path(path)
     return run_rebase(absolute_path, False, all_dirs, False)
@@ -35,14 +34,16 @@ def dry_run(path, all_dirs=False, json=False):
     Args:
         path (str): Path to the Django project directory
         all_dirs (bool): If True, scan all directories (slower but comprehensive)
-        json (bool): If True, output JSON instead of tables (default: False)
+        json (bool): If True, return JSON output instead of printing tables (default: False)
 
     Returns:
-        None
+        Optional[str]: JSON string if json=True, otherwise None
 
     Raises:
         RuntimeError: If the migration rebase operation fails
     """
+    from .rebase_migrations import run_rebase
+
     absolute_path = _expand_path(path)
     return run_rebase(absolute_path, True, all_dirs, json)
 
@@ -59,6 +60,8 @@ def execute_for_app(app_path):
     Raises:
         RuntimeError: If the migration rebase operation fails
     """
+    from .rebase_migrations import run_rebase_for_one_app
+
     absolute_path = _expand_path(app_path)
     return run_rebase_for_one_app(absolute_path, False, False)
 
@@ -68,14 +71,16 @@ def dry_run_for_app(app_path, json=False):
 
     Args:
         app_path (str): Path to the Django app directory
-        json (bool): If True, output JSON instead of tables (default: False)
+        json (bool): If True, return JSON output instead of printing tables (default: False)
 
     Returns:
-        None
+        Optional[str]: JSON string if json=True, otherwise None
 
     Raises:
         RuntimeError: If the migration rebase operation fails
     """
+    from .rebase_migrations import run_rebase_for_one_app
+
     absolute_path = _expand_path(app_path)
     return run_rebase_for_one_app(absolute_path, True, json)
 
