@@ -2,8 +2,9 @@ use std::{collections::HashMap, path::Path};
 use walkdir::WalkDir;
 
 use crate::migration::change::MigrationFileNameChange;
-use crate::migration::file::{MAX_MIGRATION_TXT, MIGRATIONS, MaxMigrationResult, Migration};
-use crate::migration::group::MigrationGroup;
+use crate::migration::changeset::ProjectChangeSet;
+use crate::migration::file::{MAX_MIGRATION_TXT, MIGRATIONS, MaxMigrationResult};
+use crate::migration::group::DjangoApp;
 use crate::tables::{TableOptions, get_table};
 
 // Common directories to skip during traversal for performance
@@ -61,10 +62,12 @@ const SKIP_DIRECTORIES: &[&str] = &[
     "docs",
 ];
 
-pub fn fix(search_path: &str, dry_run: bool, all_dirs: bool) -> Result<(), String> {
-    if dry_run {
-        println!("Dry run detected. No changes will be made.");
-    }
+pub fn rebase_apps(
+    search_path: &str,
+    dry_run: bool,
+    all_dirs: bool,
+    json: bool,
+) -> Result<Option<String>, String> {
     let search_path = Path::new(search_path);
     let mut django_project = DjangoProject::from_path(search_path, all_dirs)?;
     if django_project.apps.is_empty() {
@@ -82,16 +85,45 @@ pub fn fix(search_path: &str, dry_run: bool, all_dirs: bool) -> Result<(), Strin
     django_project.create_migration_dependency_changes(false);
 
     if dry_run {
-        django_project.changes_summary();
+        if json {
+            let json_output = django_project.to_json()?;
+            Ok(Some(json_output))
+        } else {
+            django_project.changes_summary();
+            Ok(None)
+        }
     } else {
         django_project.apply_changes()?;
+        Ok(None)
     }
-    Ok(())
+}
+
+pub fn rebase_app(app_path: &Path, dry_run: bool, json: bool) -> Result<Option<String>, String> {
+    let mut django_app = DjangoApp::try_from(app_path)?;
+    let empty_lookup = HashMap::new();
+    if let MaxMigrationResult::Conflict(conflict) = &django_app.max_migration_result {
+        let conflict = conflict.clone();
+        django_app.set_last_common_migration(conflict.incoming_change.clone())?;
+        django_app.create_migration_name_changes(conflict);
+    }
+    django_app.create_migration_dependency_changes(true, &empty_lookup);
+    if dry_run {
+        if json {
+            let json_output = django_app.to_json()?;
+            Ok(Some(json_output))
+        } else {
+            django_app.changes_summary();
+            Ok(None)
+        }
+    } else {
+        django_app.apply_changes()?;
+        Ok(None)
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct DjangoProject {
-    pub(crate) apps: HashMap<String, MigrationGroup>,
+    pub(crate) apps: HashMap<String, DjangoApp>,
 }
 
 impl DjangoProject {
@@ -133,7 +165,7 @@ impl DjangoProject {
                         path.display()
                     )
                 })?;
-                let migration_group = MigrationGroup::create(app_path)?;
+                let migration_group = DjangoApp::create(app_path)?;
                 let app_name = migration_group.get_app_name();
                 apps.insert(app_name.to_string(), migration_group);
             }
@@ -159,8 +191,14 @@ impl DjangoProject {
     /// This ensures all apps have visibility into migration name changes from other
     /// apps when updating cross-app dependencies.
     fn create_migration_dependency_changes(&mut self, same_app: bool) {
-        let mut migration_file_changes_lookup: HashMap<String, Vec<MigrationFileNameChange>> =
-            HashMap::new();
+        let migration_file_changes_lookup = self.file_changes_lookup();
+        for group in self.apps.values_mut() {
+            group.create_migration_dependency_changes(same_app, &migration_file_changes_lookup);
+        }
+    }
+
+    fn file_changes_lookup(&self) -> HashMap<String, Vec<MigrationFileNameChange>> {
+        let mut lookup: HashMap<String, Vec<MigrationFileNameChange>> = HashMap::new();
         for group in self.apps.values() {
             let app_name = group.get_app_name().to_string();
             let mut changes: Vec<MigrationFileNameChange> = group
@@ -177,43 +215,21 @@ impl DjangoProject {
                 .collect();
             changes.extend(rebased_changes);
 
-            migration_file_changes_lookup.insert(app_name, changes);
+            lookup.insert(app_name, changes);
         }
-        for group in self.apps.values_mut() {
-            group.create_migration_dependency_changes(same_app, &migration_file_changes_lookup);
-        }
+        lookup
     }
 
     fn apply_changes(&mut self) -> Result<(), String> {
         for group in self.apps.values() {
-            let migrations_dir = group.directory.clone();
-
-            // Combine both migration collections for applying changes
-            let all_migrations: Vec<&Migration> = group
-                .head_migrations
-                .values()
-                .chain(group.rebased_migrations.iter())
-                .collect();
-
-            for migration in all_migrations {
-                if let Some(changes) = &migration.name_change {
-                    changes.apply_change(&migrations_dir)?
-                }
-                if let Some(changes) = &migration.dependency_change {
-                    let migration_path =
-                        if let Some(new_path) = migration.new_full_path(&migrations_dir) {
-                            new_path
-                        } else {
-                            migration.file_path.clone()
-                        };
-                    changes.apply_change(&migration_path)?
-                }
-            }
-            if let MaxMigrationResult::Ok(max_file) = &group.max_migration_result {
-                max_file.apply_change(&migrations_dir)?;
-            }
+            group.apply_changes()?;
         }
         Ok(())
+    }
+
+    fn to_json(&self) -> Result<String, String> {
+        let changeset = ProjectChangeSet::from(self);
+        changeset.to_json()
     }
 
     fn changes_summary(&self) {
@@ -504,12 +520,12 @@ mod tests {
         fs::write(&max_migration_path, conflict_content)
             .expect("Failed to write max migration file");
 
-        let _result = fix(migrations_dir.to_str().unwrap(), false, true).unwrap();
+        let _result = rebase_apps(migrations_dir.to_str().unwrap(), false, true, false).unwrap();
         let mut django_project = DjangoProject::from_path(&migrations_dir, true).unwrap();
         let app = django_project.apps.get_mut("test_app").unwrap();
 
         // Check that the rebased migration was properly renumbered
-        // After fix() runs, the file should be renamed from 0004 to 0005
+        // After rebase_migrations() runs, the file should be renamed from 0004 to 0005
         let old_migration_path = migrations_dir.join("0004_to_be_rebased_migration.py");
         let new_migration_path = migrations_dir.join("0005_to_be_rebased_migration.py");
 
@@ -700,7 +716,7 @@ mod tests {
         fs::write(&max_migration_path, conflict_content)
             .expect("Failed to write max migration file");
 
-        let result = fix(temp_dir.path().to_str().unwrap(), false, true);
+        let result = rebase_apps(temp_dir.path().to_str().unwrap(), false, true, false);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
@@ -800,8 +816,7 @@ mod tests {
         fs::write(&max_migration_path, conflict_content)
             .expect("Failed to write max migration file");
 
-        // Run the fix
-        let result = fix(temp_dir.path().to_str().unwrap(), false, true);
+        let result = rebase_apps(temp_dir.path().to_str().unwrap(), false, true, false);
         assert!(result.is_ok(), "Fix should succeed: {:?}", result.err());
 
         // Verify the migrations were renumbered correctly
@@ -972,8 +987,7 @@ mod tests {
         fs::write(&max_migration_b_path, conflict_b)
             .expect("Failed to write app_b max_migration.txt");
 
-        // Run the fix
-        let result = fix(project_path.to_str().unwrap(), false, true);
+        let result = rebase_apps(project_path.to_str().unwrap(), false, true, false);
         assert!(result.is_ok(), "Fix should succeed: {:?}", result.err());
 
         // Verify app_a migrations were renumbered
@@ -1140,8 +1154,7 @@ mod tests {
         fs::write(&max_migration_posts_path, conflict_posts)
             .expect("Failed to write app_posts max_migration.txt");
 
-        // Run the fix
-        let result = fix(project_path.to_str().unwrap(), false, true);
+        let result = rebase_apps(project_path.to_str().unwrap(), false, true, false);
         assert!(result.is_ok(), "Fix should succeed: {:?}", result.err());
 
         // Verify app_users migrations were renumbered
@@ -1235,5 +1248,250 @@ mod tests {
         let max_posts_content = fs::read_to_string(&max_migration_posts_path)
             .expect("Failed to read app_posts max_migration.txt");
         assert_eq!(max_posts_content.trim(), "0004_add_comments");
+    }
+
+    #[test]
+    fn test_rebase_app_basic() {
+        use crate::migration::test_helpers::*;
+
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create test migrations - HEAD branch
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("test_app", "'0001_initial'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "head_change",
+            vec![("test_app", "'0002_add_field'")],
+        );
+        // Feature branch migration
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "rebased_change",
+            vec![("test_app", "'0002_add_field'")],
+        );
+
+        // Create max_migration.txt with conflict
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
+        let conflict_content = r#"<<<<<<< HEAD
+0003_head_change
+=======
+0003_rebased_change
+>>>>>>> feature-branch"#;
+        fs::write(&max_migration_path, conflict_content)
+            .expect("Failed to write max migration file");
+
+        // Run rebase_app
+        let app_path = migrations_dir.parent().unwrap();
+        let result = rebase_app(app_path, false, false);
+
+        assert!(result.is_ok(), "rebase_app should succeed");
+
+        // Verify file was renamed
+        assert!(
+            !migrations_dir.join("0003_rebased_change.py").exists(),
+            "Old file should be renamed"
+        );
+        assert!(
+            migrations_dir.join("0004_rebased_change.py").exists(),
+            "New file should exist"
+        );
+
+        // Verify max_migration.txt was updated
+        let max_content = fs::read_to_string(&max_migration_path).unwrap();
+        assert_eq!(max_content.trim(), "0004_rebased_change");
+    }
+
+    #[test]
+    fn test_rebase_app_dry_run() {
+        use crate::migration::test_helpers::*;
+
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create test migrations - HEAD branch
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("test_app", "'0001_initial'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "head_change",
+            vec![("test_app", "'0002_add_field'")],
+        );
+        // Feature branch migration
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "rebased_change",
+            vec![("test_app", "'0002_add_field'")],
+        );
+
+        // Create max_migration.txt with conflict
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
+        let conflict_content = r#"<<<<<<< HEAD
+0003_head_change
+=======
+0003_rebased_change
+>>>>>>> feature-branch"#;
+        fs::write(&max_migration_path, conflict_content)
+            .expect("Failed to write max migration file");
+
+        // Run rebase_app in dry-run mode
+        let app_path = migrations_dir.parent().unwrap();
+        let result = rebase_app(app_path, true, false);
+
+        assert!(result.is_ok(), "rebase_app dry run should succeed");
+
+        // Verify file was NOT renamed (dry run)
+        assert!(
+            migrations_dir.join("0003_rebased_change.py").exists(),
+            "Old file should still exist in dry run"
+        );
+        assert!(
+            !migrations_dir.join("0004_rebased_change.py").exists(),
+            "New file should not exist in dry run"
+        );
+
+        // Verify max_migration.txt was NOT updated (dry run)
+        let max_content = fs::read_to_string(&max_migration_path).unwrap();
+        assert!(max_content.contains("<<<<<<< HEAD"));
+    }
+
+    #[test]
+    fn test_rebase_app_no_conflict() {
+        use crate::migration::test_helpers::*;
+
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create test migrations
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("test_app", "'0001_initial'")],
+        );
+
+        // Create max_migration.txt without conflict
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
+        fs::write(&max_migration_path, "0002_add_field\n")
+            .expect("Failed to write max migration file");
+
+        // Run rebase_app
+        let app_path = migrations_dir.parent().unwrap();
+        let result = rebase_app(app_path, false, false);
+
+        assert!(
+            result.is_ok(),
+            "rebase_app should succeed even without conflict"
+        );
+
+        // Verify files remain unchanged
+        assert!(migrations_dir.join("0002_add_field.py").exists());
+    }
+
+    #[test]
+    fn test_rebase_app_missing_migrations_folder() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let app_path = temp_dir.path().join("test_app");
+        fs::create_dir_all(&app_path).expect("Failed to create app directory");
+
+        let result = rebase_app(&app_path, false, false);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Provided path does not contain migrations folder"
+        );
+    }
+
+    #[test]
+    fn test_rebase_app_missing_max_migration_txt() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let app_path = temp_dir.path().join("test_app");
+        let migrations_dir = app_path.join(MIGRATIONS);
+        fs::create_dir_all(&migrations_dir).expect("Failed to create migrations directory");
+
+        let result = rebase_app(&app_path, false, false);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Provided path does not contain max_migrations.txt"
+        );
+    }
+
+    #[test]
+    fn test_rebase_app_with_dependency_changes() {
+        use crate::migration::test_helpers::*;
+
+        let (_temp_dir, migrations_dir) = setup_test_env();
+
+        // Create test migrations with dependencies - HEAD branch
+        create_test_migration_file(&migrations_dir, 1, "initial", vec![]);
+        create_test_migration_file(
+            &migrations_dir,
+            2,
+            "add_field",
+            vec![("test_app", "'0001_initial'")],
+        );
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "head_change",
+            vec![("test_app", "'0002_add_field'")],
+        );
+        // Feature branch migration - depends on 0001 to demonstrate dependency update
+        create_test_migration_file(
+            &migrations_dir,
+            3,
+            "rebased_change",
+            vec![("test_app", "'0001_initial'")],
+        );
+
+        // Create max_migration.txt with conflict
+        let max_migration_path = migrations_dir.join(MAX_MIGRATION_TXT);
+        let conflict_content = r#"<<<<<<< HEAD
+0003_head_change
+=======
+0003_rebased_change
+>>>>>>> feature-branch"#;
+        fs::write(&max_migration_path, conflict_content)
+            .expect("Failed to write max migration file");
+
+        // Run rebase_app
+        let app_path = migrations_dir.parent().unwrap();
+        let result = rebase_app(app_path, false, false);
+
+        assert!(result.is_ok(), "rebase_app should succeed");
+
+        // Verify the rebased migration was renumbered
+        assert!(
+            migrations_dir.join("0004_rebased_change.py").exists(),
+            "Rebased migration should be renumbered to 0004"
+        );
+
+        // Verify the dependency was updated
+        let rebased_content = fs::read_to_string(migrations_dir.join("0004_rebased_change.py"))
+            .expect("Failed to read rebased migration");
+
+        // The dependency on 0001 should be updated to 0003 (last HEAD migration)
+        // because 0001 is the last common migration and rebased migrations should point to last HEAD
+        assert!(
+            rebased_content.contains("('test_app', '0003_head_change')"),
+            "Dependency should be updated to last HEAD migration (0003_head_change), got:\n{}",
+            rebased_content
+        );
     }
 }

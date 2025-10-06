@@ -1,7 +1,9 @@
 //! Test helper functions shared across migration tests
 
 #[cfg(test)]
-use crate::migration::file::{MAX_MIGRATION_TXT, MIGRATIONS};
+use crate::migration::change::{MigrationDependencyChange, MigrationFileNameChange};
+#[cfg(test)]
+use crate::migration::file::{Migration, MigrationFileName, MAX_MIGRATION_TXT, MIGRATIONS};
 #[cfg(test)]
 use std::{
     fs,
@@ -66,4 +68,27 @@ class Migration(migrations.Migration):
     );
     fs::write(&file_path, content).expect("Failed to write test migration file");
     file_path
+}
+
+/// Helper function to create an in-memory Migration struct for unit tests.
+/// This does NOT create actual files on disk - use create_test_migration_file for that.
+#[cfg(test)]
+pub fn create_in_memory_migration(
+    file_name: &str,
+    app_name: &str,
+    name_change: Option<MigrationFileNameChange>,
+    dependency_change: Option<MigrationDependencyChange>,
+) -> Migration {
+    Migration {
+        file_path: PathBuf::from(format!(
+            "/test/app/{}/migrations/{}.py",
+            app_name, file_name
+        )),
+        file_name: MigrationFileName::try_from(file_name.to_string()).unwrap(),
+        app_name: app_name.to_string(),
+        dependencies: vec![],
+        from_rebased_branch: false,
+        name_change,
+        dependency_change,
+    }
 }

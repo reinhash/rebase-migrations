@@ -30,6 +30,7 @@ This tool automatically detects and renumbers conflicting migrations during reba
 - 🔗 Updates migration dependencies in Python AST
 - 📄 Updates `max_migration.txt` files
 - 🧪 Dry Run Mode: Preview changes before applying them
+- 📊 JSON Output: Machine-readable output for automation and tooling
 
 ## CLI Tool
 
@@ -80,7 +81,45 @@ git rebase --continue
 
 - `--path <PATH>`: Path to the Django project root (default: current directory)
 - `--dry-run`: Show what would be changed without making modifications
+- `--json`: Output changes as JSON (requires `--dry-run`)
 - `--all-dirs`: Scan all directories without skipping common build/cache directories (slower but comprehensive)
+
+#### JSON Output
+
+Use `--json` with `--dry-run` to get machine-readable output:
+
+```bash
+rebase-migrations --dry-run --json
+```
+
+Example JSON output:
+```json
+{
+  "apps": {
+    "myapp": {
+      "app_name": "myapp",
+      "last_common_migration": "0001_initial",
+      "migration_changes": [
+        {
+          "migration_file_name": "0002_add_field",
+          "file_rename": {
+            "old_name": "0002_add_field",
+            "new_name": "0004_add_field"
+          }
+        }
+      ],
+      "max_migration_update": {
+        "old": "0003_main_branch",
+        "new": "0004_add_field"
+      }
+    }
+  }
+}
+```
+
+This is useful for:
+- Programmatic processing of migration changes
+- Custom tooling and automation
 
 ## Python Package
 

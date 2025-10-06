@@ -1,4 +1,5 @@
 pub mod change;
+pub mod changeset;
 pub mod file;
 pub mod group;
 pub mod parser;

@@ -6,23 +6,49 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use std::path::Path;
+
 mod migration;
 mod tables;
 mod utils;
 
 #[pyfunction]
-#[pyo3(signature = (path, dry_run=false, all_dirs=false))]
+#[pyo3(signature = (path, dry_run=false, all_dirs=false, json=false))]
 /// Fix Django migration conflicts during git rebase.
 ///
 /// Args:
 ///     path: Path to the Django project directory
 ///     dry_run: If True, preview changes without applying them (default: False)
 ///     all_dirs: If True, scan all directories for performance (default: False)
+///     json: If True, return JSON output as a string (requires dry_run=True) (default: False)
+///
+/// Returns:
+///     Optional[str]: JSON string if dry_run=True and json=True, otherwise None
 ///
 /// Raises:
 ///     RuntimeError: If the migration rebase operation fails
-fn run_rebase(path: &str, dry_run: bool, all_dirs: bool) -> PyResult<()> {
-    migration::project::fix(path, dry_run, all_dirs).map_err(PyErr::new::<PyRuntimeError, _>)
+fn run_rebase(path: &str, dry_run: bool, all_dirs: bool, json: bool) -> PyResult<Option<String>> {
+    migration::project::rebase_apps(path, dry_run, all_dirs, json)
+        .map_err(PyErr::new::<PyRuntimeError, _>)
+}
+
+#[pyfunction]
+#[pyo3(signature = (app_path, dry_run=false, json=false))]
+/// Fix Django migration conflicts during git rebase.
+///
+/// Args:
+///     app_path: Path to the Django App directory
+///     dry_run: If True, preview changes without applying them (default: False)
+///     json: If True, return JSON output as a string (requires dry_run=True) (default: False)
+///
+/// Returns:
+///     Optional[str]: JSON string if dry_run=True and json=True, otherwise None
+///
+/// Raises:
+///     RuntimeError: If the migration rebase operation fails
+fn run_rebase_for_one_app(app_path: &str, dry_run: bool, json: bool) -> PyResult<Option<String>> {
+    let app_path = Path::new(app_path);
+    migration::project::rebase_app(app_path, dry_run, json).map_err(PyErr::new::<PyRuntimeError, _>)
 }
 
 /// A Python module implemented in Rust. The name of this function must match
@@ -31,6 +57,7 @@ fn run_rebase(path: &str, dry_run: bool, all_dirs: bool) -> PyResult<()> {
 #[pymodule]
 fn rebase_migrations(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_rebase, m)?)?;
+    m.add_function(wrap_pyfunction!(run_rebase_for_one_app, m)?)?;
 
     Ok(())
 }

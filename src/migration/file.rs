@@ -1,4 +1,5 @@
 use rustpython_parser::ast;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,8 @@ use crate::migration::parser::MigrationParser;
 pub const MIGRATIONS: &str = "migrations";
 pub const MAX_MIGRATION_TXT: &str = "max_migration.txt";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
 pub struct MigrationFileName(pub String);
 
 impl TryFrom<&ast::Expr> for MigrationFileName {
@@ -213,10 +215,25 @@ impl Migration {
         }
     }
 
-    pub fn new_full_path(&self, directory: &Path) -> Option<PathBuf> {
+    pub fn new_full_path(&self) -> Option<PathBuf> {
+        let directory = self.parent_directory();
         let name_change = self.name_change.clone()?;
         let new_path = directory.join(name_change.new_name.0);
         Some(new_path.with_extension("py"))
+    }
+
+    pub fn parent_directory(&self) -> PathBuf {
+        self.file_path.parent().unwrap().to_path_buf()
+    }
+
+    pub fn apply_changes(&self) -> Result<(), String> {
+        if let Some(changes) = &self.name_change {
+            changes.apply_change(&self)?
+        }
+        if let Some(changes) = &self.dependency_change {
+            changes.apply_change(&self)?
+        }
+        Ok(())
     }
 
     /// Check that no merge migration exists in one of the rebased migrations.
@@ -325,7 +342,7 @@ impl Iterator for MigrationIterator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MigrationDependency {
     pub app: String,
     pub migration_file: MigrationFileName,
