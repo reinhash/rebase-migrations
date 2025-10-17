@@ -387,12 +387,7 @@ impl DjangoApp {
     pub fn create(app_path: &Path) -> Result<Self, String> {
         let directory = app_path.join(MIGRATIONS);
 
-        // 1. open max migration file
-        // 2. check for conflict
-        //   - with conflict: parse first HEAD, then FEATURE branch migration
-        //   - no conflict: parse the file as indicated by max_migration
-
-        let mut migrations = HashMap::new();
+        // Step 1: Load max migration file
         let max_migration_result = Self::load_max_migration_file(&directory);
         let head = match &max_migration_result {
             MaxMigrationResult::Ok(max_migration_file) => {
@@ -406,11 +401,19 @@ impl DjangoApp {
                 ));
             }
         };
+
+        // Step 2: Build dependency tree starting from head migration
+        // Note: The dependency iterator (Migration::iter()) will handle loading
+        // dependencies on-demand. The OS filesystem cache will help with repeated reads.
         let migration_path = directory.join(head.0).with_extension("py");
         let head_migration = Migration::try_from(migration_path)?;
+
+        // Build the dependency chain
+        let mut migrations = HashMap::new();
         for migration in head_migration.iter() {
             migrations.insert(migration.file_path.clone(), migration);
         }
+
         Ok(Self {
             head_migrations: migrations,
             directory,
