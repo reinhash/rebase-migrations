@@ -326,6 +326,17 @@ impl DjangoApp {
 
     /// Displays a summary of all changes that will be applied.
     pub fn changes_summary(&self) {
+        // Show summary table first
+        println!(
+            "{}",
+            crate::tables::get_table(crate::tables::TableOptions::SingleAppSummary(
+                self.get_app_name(),
+                self
+            ))
+            .display()
+            .unwrap()
+        );
+
         let has_migration_changes = self
             .head_migrations
             .values()
@@ -336,6 +347,7 @@ impl DjangoApp {
                 .any(|m| m.name_change.is_some() || m.dependency_change.is_some());
 
         if has_migration_changes {
+            println!();
             println!(
                 "{}",
                 crate::tables::get_table(crate::tables::TableOptions::MigrationChanges(
