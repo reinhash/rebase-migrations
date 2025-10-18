@@ -4,4 +4,5 @@ pub mod file;
 pub mod group;
 pub mod parser;
 pub mod project;
-mod test_helpers;
+#[cfg(test)]
+pub mod test_helpers;
