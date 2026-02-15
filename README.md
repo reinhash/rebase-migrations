@@ -1,6 +1,14 @@
 # Django Migration Rebase Tool
 
-A tool that automatically renumbers Django migration files to resolve conflicts during git rebases. Available as both a standalone CLI binary and a Python library. Designed to work seamlessly with [django-linear-migrations](https://github.com/adamchainz/django-linear-migrations).
+A tool that automatically renumbers Django migration files to resolve conflicts during git rebases. Available as both a standalone CLI binary and a Python library. Designed to augment [django-linear-migrations](https://github.com/adamchainz/django-linear-migrations).
+
+## Requirements
+
+This tool automatically updates the `max_migration.txt` files that `django-linear-migrations` uses to track the latest migration in each app. Therefore, please make sure you have the **[django-linear-migrations](https://github.com/adamchainz/django-linear-migrations)** package installed and configured.
+Also, the tool requires:
+
+- Git repository
+- Python migration files following Django naming convention (`NNNN_name.py`)
 
 ## The Problem
 
@@ -156,14 +164,6 @@ Use `--all-dirs` if you have Django apps in unconventional locations or if the d
 5. **Updates dependencies**: Modifies Python AST to update migration dependencies
 6. **Updates tracking files**: Updates `max_migration.txt`
 
-
-## Requirements
-
-- Git repository
-- Python migration files following Django naming convention (`NNNN_name.py`)
-- **[django-linear-migrations](https://github.com/adamchainz/django-linear-migrations)** package installed and configured
-
-This tool automatically updates the `max_migration.txt` files that `django-linear-migrations` uses to track the latest migration in each app.
 
 ## Contributing
 
